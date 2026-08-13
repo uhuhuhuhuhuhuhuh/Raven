@@ -85,20 +85,18 @@ export function RavenMap({
             attribution: '© OpenStreetMap contributors'
           }
         },
-        layers: [
-          {
-            id: 'osm',
-            type: 'raster',
-            source: 'osm',
-            paint: {
-              'raster-saturation': -0.85,
-              'raster-brightness-min': 0.12,
-              'raster-brightness-max': 0.48,
-              'raster-contrast': 0.3,
-              'raster-hue-rotate': 70
-            }
+        layers: [{
+          id: 'osm',
+          type: 'raster',
+          source: 'osm',
+          paint: {
+            'raster-saturation': -0.85,
+            'raster-brightness-min': 0.12,
+            'raster-brightness-max': 0.48,
+            'raster-contrast': 0.3,
+            'raster-hue-rotate': 70
           }
-        ]
+        }]
       }
     });
 
@@ -162,10 +160,7 @@ export function RavenMap({
         type: 'symbol',
         source: 'contacts',
         filter: ['has', 'point_count'],
-        layout: {
-          'text-field': ['get', 'point_count_abbreviated'],
-          'text-size': 11
-        },
+        layout: { 'text-field': ['get', 'point_count_abbreviated'], 'text-size': 11 },
         paint: { 'text-color': '#d9ffec' }
       });
 
@@ -190,18 +185,8 @@ export function RavenMap({
         }
       });
 
-      map.addLayer({
-        id: 'scan-area-fill',
-        type: 'fill',
-        source: 'scan-area',
-        paint: { 'fill-color': '#65f0b5', 'fill-opacity': 0.025 }
-      });
-      map.addLayer({
-        id: 'scan-area-line',
-        type: 'line',
-        source: 'scan-area',
-        paint: { 'line-color': '#65f0b5', 'line-width': 1.2, 'line-opacity': 0.7, 'line-dasharray': [2, 2] }
-      });
+      map.addLayer({ id: 'scan-area-fill', type: 'fill', source: 'scan-area', paint: { 'fill-color': '#65f0b5', 'fill-opacity': 0.025 } });
+      map.addLayer({ id: 'scan-area-line', type: 'line', source: 'scan-area', paint: { 'line-color': '#65f0b5', 'line-width': 1.2, 'line-opacity': 0.7, 'line-dasharray': [2, 2] } });
 
       map.on('click', 'contacts-points', event => {
         const id = event.features?.[0]?.properties?.id;
@@ -223,7 +208,6 @@ export function RavenMap({
         map.on('mouseenter', layer, () => { map.getCanvas().style.cursor = 'pointer'; });
         map.on('mouseleave', layer, () => { map.getCanvas().style.cursor = ''; });
       }
-
       emitViewport();
     });
 
@@ -260,7 +244,7 @@ export function RavenMap({
   useEffect(() => {
     if (!focus || !mapRef.current) return;
     mapRef.current.flyTo({ center: [focus.lon, focus.lat], zoom: focus.zoom, essential: true });
-  }, [focus?.token]);
+  }, [focus]);
 
   return <div ref={containerRef} className="map-canvas" aria-label="Raven public camera map" />;
 }

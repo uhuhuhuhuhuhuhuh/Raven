@@ -22,13 +22,18 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
       - name: Install frontend dependencies
         working-directory: frontend
-        run: npm install --no-audit --no-fund
+        run: npm ci --no-audit --no-fund
       - name: Typecheck
         working-directory: frontend
         run: npm run typecheck
-      - name: Unit and state tests
+      - name: Lint
+        working-directory: frontend
+        run: npm run lint
+      - name: Unit, provider, and cache tests
         working-directory: frontend
         run: npm test
       - name: Build GitHub Pages edition

@@ -9,13 +9,11 @@ if (-not (Test-Path ".venv/Scripts/python.exe")) {
 
 & .venv/Scripts/python.exe -m pip install -q -r server/requirements.txt
 
-if (-not (Test-Path "frontend/dist/index.html")) {
-  if (-not (Get-Command npm -ErrorAction SilentlyContinue)) { throw "Node.js/npm is required to build the WebUI." }
-  Push-Location frontend
-  npm install
-  npm run build
-  Pop-Location
-}
+if (-not (Get-Command npm -ErrorAction SilentlyContinue)) { throw "Node.js/npm is required to build the WebUI." }
+Push-Location frontend
+npm ci --no-audit --no-fund
+npm run build
+Pop-Location
 
 Write-Host "[RAVEN] Local WebUI: http://127.0.0.1:8742"
 Start-Process "http://127.0.0.1:8742"

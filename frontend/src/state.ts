@@ -1,5 +1,6 @@
 import type {
   LayerKey,
+  ProviderProgress,
   ProviderRun,
   RavenBounds,
   RavenFeature,
@@ -33,9 +34,10 @@ export type RavenAction =
   | { type: 'MODE_SET'; mode: RavenMode }
   | { type: 'VIEWPORT_CHANGED'; viewport: RavenViewport; markDirty?: boolean }
   | { type: 'REFERENCE_ORIGIN_SET'; point: RavenPoint; source: 'scan' | 'gps' | 'manual' }
-  | { type: 'SCAN_BEGIN'; id: string; bounds: RavenBounds; center: RavenPoint; activeProviderIds: string[]; allProviderIds: string[]; timestamp: number }
-  | { type: 'PROVIDER_SUCCESS'; scanId: string; providerId: string; features: RavenFeature[]; pages?: number; timestamp: number }
-  | { type: 'PROVIDER_ERROR'; scanId: string; providerId: string; error: string; timestamp: number }
+  | { type: 'SCAN_BEGIN'; id: string; bounds: RavenBounds; center: RavenPoint; activeProviderIds: string[]; allProviderIds: string[]; skipReasons?: Record<string, string>; timestamp: number }
+  | { type: 'PROVIDER_PROGRESS'; scanId: string; providerId: string; features: RavenFeature[]; progress: ProviderProgress; pages?: number; fromCache?: boolean; timestamp: number }
+  | { type: 'PROVIDER_SUCCESS'; scanId: string; providerId: string; features: RavenFeature[]; pages?: number; warning?: string; fromCache?: boolean; timestamp: number }
+  | { type: 'PROVIDER_ERROR'; scanId: string; providerId: string; error: string; features?: RavenFeature[]; timestamp: number }
   | { type: 'SCAN_FINISH'; scanId: string; status: Exclude<ScanStatus, 'idle' | 'dirty' | 'scanning'>; timestamp: number }
   | { type: 'LAYER_TOGGLE'; layer: LayerKey }
   | { type: 'LAYER_SET'; layer: LayerKey; value: boolean }
@@ -87,6 +89,14 @@ function boundsDiffer(a?: RavenBounds, b?: RavenBounds): boolean {
     Math.abs(a.north - b.north) > epsilon;
 }
 
+export function hasSnapshot(feature: RavenFeature): boolean {
+  return Boolean(feature.snapshotUrl);
+}
+
+export function hasStream(feature: RavenFeature): boolean {
+  return Boolean(feature.streamUrl || feature.streamPageUrl);
+}
+
 export function ravenReducer(state: RavenState, action: RavenAction): RavenState {
   switch (action.type) {
     case 'MODE_SET':
@@ -95,11 +105,7 @@ export function ravenReducer(state: RavenState, action: RavenAction): RavenState
       const shouldDirty = action.markDirty !== false &&
         ['ready', 'partial'].includes(state.scan.status) &&
         boundsDiffer(state.scan.bounds, action.viewport.bounds);
-      return {
-        ...state,
-        viewport: action.viewport,
-        scan: shouldDirty ? { ...state.scan, status: 'dirty' } : state.scan
-      };
+      return { ...state, viewport: action.viewport, scan: shouldDirty ? { ...state.scan, status: 'dirty' } : state.scan };
     }
     case 'REFERENCE_ORIGIN_SET':
       return { ...state, referenceOrigin: { ...action.point, source: action.source } };
@@ -111,23 +117,36 @@ export function ravenReducer(state: RavenState, action: RavenAction): RavenState
           providerId,
           status: active.has(providerId) ? 'loading' : 'skipped',
           features: [],
-          scanId: action.id
+          scanId: action.id,
+          skipReason: active.has(providerId) ? undefined : action.skipReasons?.[providerId]
         };
       }
       return {
         ...state,
-        scan: {
-          id: action.id,
-          status: 'scanning',
-          bounds: action.bounds,
-          center: action.center,
-          startedAt: action.timestamp
-        },
-        referenceOrigin: state.referenceOrigin.source === 'scan'
-          ? { ...action.center, source: 'scan' }
-          : state.referenceOrigin,
+        scan: { id: action.id, status: 'scanning', bounds: action.bounds, center: action.center, startedAt: action.timestamp },
+        referenceOrigin: state.referenceOrigin.source === 'scan' ? { ...action.center, source: 'scan' } : state.referenceOrigin,
         providers,
         selectionId: null
+      };
+    }
+    case 'PROVIDER_PROGRESS': {
+      if (state.scan.id !== action.scanId) return state;
+      return {
+        ...state,
+        providers: {
+          ...state.providers,
+          [action.providerId]: {
+            ...state.providers[action.providerId],
+            providerId: action.providerId,
+            status: 'loading',
+            features: action.features,
+            fetchedAt: action.timestamp,
+            scanId: action.scanId,
+            pages: action.pages,
+            progress: action.progress,
+            fromCache: action.fromCache
+          }
+        }
       };
     }
     case 'PROVIDER_SUCCESS': {
@@ -137,12 +156,17 @@ export function ravenReducer(state: RavenState, action: RavenAction): RavenState
         providers: {
           ...state.providers,
           [action.providerId]: {
+            ...state.providers[action.providerId],
             providerId: action.providerId,
             status: 'ready',
             features: action.features,
             fetchedAt: action.timestamp,
             scanId: action.scanId,
-            pages: action.pages
+            pages: action.pages,
+            warning: action.warning,
+            fromCache: action.fromCache,
+            progress: undefined,
+            error: undefined
           }
         }
       };
@@ -154,12 +178,14 @@ export function ravenReducer(state: RavenState, action: RavenAction): RavenState
         providers: {
           ...state.providers,
           [action.providerId]: {
+            ...state.providers[action.providerId],
             providerId: action.providerId,
             status: 'error',
-            features: [],
+            features: action.features || [],
             error: action.error,
             fetchedAt: action.timestamp,
-            scanId: action.scanId
+            scanId: action.scanId,
+            progress: undefined
           }
         }
       };
@@ -195,8 +221,11 @@ export function allFeatures(state: RavenState): RavenFeature[] {
 export function visibleFeatures(state: RavenState): RavenFeature[] {
   return allFeatures(state).filter(feature => {
     if (feature.cameraType === 'speed') return state.layers.speedCameras;
-    if (feature.mediaType === 'snapshot') return state.layers.snapshots;
-    if (feature.mediaType === 'stream') return state.layers.streams;
+    const snapshot = hasSnapshot(feature);
+    const stream = hasStream(feature);
+    if (stream && state.layers.streams) return true;
+    if (snapshot && state.layers.snapshots) return true;
+    if (stream || snapshot) return false;
     return state.layers.mappedCameras;
   });
 }

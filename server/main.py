@@ -22,9 +22,9 @@ OVERPASS_URL = os.getenv("RAVEN_OVERPASS_URL", "https://overpass-api.de/api/inte
 NOMINATIM_URL = os.getenv("RAVEN_NOMINATIM_URL", "https://nominatim.openstreetmap.org/search")
 CACHE_TTL = int(os.getenv("RAVEN_CACHE_TTL", "300"))
 SEARCH_CACHE_TTL = int(os.getenv("RAVEN_SEARCH_CACHE_TTL", "86400"))
-USER_AGENT = "Raven/1.0 (+https://github.com/uhuhuhuhuhuhuhuh/Raven)"
+USER_AGENT = "Raven/1.1 (+https://github.com/uhuhuhuhuhuhuhuh/Raven)"
 
-app = FastAPI(title="Raven Local API", version="1.0.0")
+app = FastAPI(title="Raven Local API", version="1.1.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
@@ -145,7 +145,7 @@ def health() -> dict[str, Any]:
     return {
         "service": "raven",
         "mode": "local",
-        "version": "1.0.0",
+        "version": "1.1.0",
         "database": str(DB_PATH),
         "frontendBuilt": (FRONTEND_DIST / "index.html").exists(),
     }
@@ -168,6 +168,15 @@ def providers() -> dict[str, Any]:
                 "capabilities": ["snapshot", "direction", "operator"],
                 "enabled": True,
                 "execution": "browser",
+                "coverage": "Florida",
+            },
+            {
+                "id": "caltrans-cctv",
+                "name": "Caltrans CCTV",
+                "capabilities": ["snapshot", "stream", "direction", "operator"],
+                "enabled": True,
+                "execution": "browser",
+                "coverage": "California",
             },
         ]
     }
@@ -266,5 +275,5 @@ else:
     def frontend_missing() -> dict[str, str]:
         return {
             "service": "raven",
-            "message": "Frontend is not built. Run npm install && npm run build in frontend/ or use scripts/run-local.*",
+            "message": "Frontend is not built. Run npm ci && npm run build in frontend/ or use scripts/run-local.*",
         }

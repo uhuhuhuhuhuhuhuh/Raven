@@ -1,0 +1,37 @@
+.stream-link {
+  display: block;
+  padding: 10px 12px;
+  border-top: 1px solid var(--line);
+  color: var(--cyan);
+  text-decoration: none;
+  font-size: 8px;
+  letter-spacing: .06em;
+}
+.stream-link:hover { background: rgba(98,242,255,.08); }
+.media-fallback { border-top: 1px solid var(--line); }
+.media-fallback summary, .debug-details summary {
+  cursor: pointer;
+  padding: 9px 12px;
+  color: var(--muted);
+  font-size: 8px;
+  letter-spacing: .06em;
+}
+.external-stream .snapshot-viewer { border-top: 0; }
+.debug-details { border-top: 1px solid var(--line); }
+.debug-details pre {
+  margin: 0;
+  padding: 10px 12px;
+  max-height: 240px;
+  overflow: auto;
+  background: rgba(0,0,0,.28);
+  color: #8fb9a8;
+  font-size: 7px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.provider-health .health-line .warning-text { color: var(--amber); }
+.scan-loading .scan-readout strong { color: var(--cyan); }
+@media (max-width: 900px) {
+  .debug-details pre { max-height: 180px; }
+}

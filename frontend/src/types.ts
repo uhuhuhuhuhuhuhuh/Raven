@@ -41,6 +41,7 @@ export type RavenFeature = {
   sourceUrl?: string;
   snapshotUrl?: string;
   streamUrl?: string;
+  streamPageUrl?: string;
   sourceUpdatedAt?: string;
   attribution?: string;
   fetchedAt: string;
@@ -50,14 +51,23 @@ export type RavenFeature = {
 export type ProviderRunStatus = 'idle' | 'loading' | 'ready' | 'error' | 'skipped';
 export type ScanStatus = 'idle' | 'dirty' | 'scanning' | 'partial' | 'ready' | 'error';
 
+export type ProviderProgress = {
+  completed: number;
+  total: number;
+};
+
 export type ProviderRun = {
   providerId: string;
   status: ProviderRunStatus;
   features: RavenFeature[];
   error?: string;
+  warning?: string;
   fetchedAt?: number;
   scanId?: string;
   pages?: number;
+  progress?: ProviderProgress;
+  fromCache?: boolean;
+  skipReason?: string;
 };
 
 export type LayerKey = 'mappedCameras' | 'snapshots' | 'streams' | 'speedCameras' | 'heat' | 'scanOutline';

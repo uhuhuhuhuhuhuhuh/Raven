@@ -4,6 +4,7 @@ import 'maplibre-gl/dist/maplibre-gl.css';
 import App from './App';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import './styles.css';
+import './finalization.css';
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
