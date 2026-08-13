@@ -1,11 +1,12 @@
-import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
-import maplibregl, { GeoJSONSource, Map as MapLibreMap } from 'maplibre-gl';
-import { detectMode, scanArea, searchPlace } from './api';
-import type { RavenFeature, RavenMode } from './types';
-
-const DEFAULT_ORIGIN = { lat: 25.7617, lon: -80.1918 };
-const TYPE_ORDER = ['live', 'alpr', 'fixed', 'dome', 'ptz', 'panorama', 'speed', 'unknown'] as const;
-const MAX_AUTO_RADIUS = 50000;
+import { FormEvent, useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
+import { CameraViewer } from './components/CameraViewer';
+import { LayerPanel } from './components/LayerPanel';
+import { RavenMap, type MapFocus } from './components/RavenMap';
+import { VirtualContactList, type EnrichedFeature } from './components/VirtualContactList';
+import { activeProviders, providerById, ravenProviders } from './providers/registry';
+import { searchPlace } from './search';
+import { allFeatures, createInitialState, logEntry, ravenReducer, visibleFeatures } from './state';
+import type { LayerKey, RavenFeature, RavenMode, RavenViewport } from './types';
 
 function toRad(value: number) { return value * Math.PI / 180; }
 function toDeg(value: number) { return value * 180 / Math.PI; }
@@ -24,337 +25,321 @@ function bearingDegrees(aLat: number, aLon: number, bLat: number, bLon: number) 
   return (toDeg(Math.atan2(y, x)) + 360) % 360;
 }
 function formatRange(meters: number) { return meters >= 1000 ? `${(meters / 1000).toFixed(2)} km` : `${Math.round(meters)} m`; }
-function typeLabel(feature: RavenFeature) { return feature.kind === 'live-feed' ? 'LIVE' : (feature.cameraType || 'unknown').toUpperCase(); }
-function viewportRadius(map: MapLibreMap) {
-  const center = map.getCenter();
-  const bounds = map.getBounds();
-  const corners = [bounds.getNorthEast(), bounds.getNorthWest(), bounds.getSouthEast(), bounds.getSouthWest()];
-  const farthest = Math.max(...corners.map(corner => distanceMeters(center.lat, center.lng, corner.lat, corner.lng)));
-  return Math.min(MAX_AUTO_RADIUS, Math.max(250, Math.ceil((farthest * 1.05) / 250) * 250));
+function typeLabel(feature: RavenFeature) {
+  if (feature.mediaType === 'snapshot') return 'SNAPSHOT';
+  if (feature.mediaType === 'stream') return 'STREAM';
+  if (feature.mediaType === 'external') return 'EXTERNAL';
+  return (feature.cameraType || 'unknown').toUpperCase();
+}
+function scanId() {
+  return globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+function abortError(error: unknown) {
+  return error instanceof DOMException && error.name === 'AbortError';
 }
 
-const demoFeatures: RavenFeature[] = [
-  { id: 'demo-1', providerId: 'demo', kind: 'camera', cameraType: 'fixed', name: 'Demo Fixed Camera', lat: 25.7682, lon: -80.1971, bearing: 145, attribution: 'Demo data', fetchedAt: new Date().toISOString(), metadata: {} },
-  { id: 'demo-2', providerId: 'demo', kind: 'camera', cameraType: 'dome', name: 'Demo Dome Camera', lat: 25.7569, lon: -80.1874, attribution: 'Demo data', fetchedAt: new Date().toISOString(), metadata: {} },
-  { id: 'demo-3', providerId: 'demo', kind: 'camera', cameraType: 'alpr', name: 'Demo ALPR Marker', lat: 25.7633, lon: -80.1815, bearing: 270, attribution: 'Demo data', fetchedAt: new Date().toISOString(), metadata: {} }
-];
+async function detectMode(): Promise<RavenMode> {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), 1100);
+  try {
+    const response = await fetch(`${window.location.origin}/api/health`, {
+      signal: controller.signal,
+      headers: { Accept: 'application/json' }
+    });
+    if (!response.ok) return 'static';
+    const payload = await response.json();
+    return payload?.service === 'raven' ? 'local' : 'static';
+  } catch {
+    return 'static';
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 export default function App() {
-  const mapContainer = useRef<HTMLDivElement | null>(null);
-  const mapRef = useRef<MapLibreMap | null>(null);
-  const autoRadiusRef = useRef(true);
-  const [mode, setMode] = useState<RavenMode>('detecting');
-  const [origin, setOrigin] = useState(DEFAULT_ORIGIN);
-  const [radius, setRadius] = useState(1800);
-  const [autoRadius, setAutoRadius] = useState(true);
-  const [liveEnabled, setLiveEnabled] = useState(true);
-  const [features, setFeatures] = useState<RavenFeature[]>(demoFeatures);
-  const [selectedId, setSelectedId] = useState<string | null>(demoFeatures[0].id);
-  const [status, setStatus] = useState('READY');
-  const [query, setQuery] = useState('');
-  const [scanActive, setScanActive] = useState(false);
-  const [heatEnabled, setHeatEnabled] = useState(false);
-  const [ringsEnabled, setRingsEnabled] = useState(true);
+  const [state, dispatch] = useReducer(ravenReducer, undefined, createInitialState);
   const [clock, setClock] = useState(new Date());
-  const [logs, setLogs] = useState<string[]>(['SYSTEM  RAVEN INITIALIZED', 'MAP     DEMO CONTACTS LOADED']);
+  const [query, setQuery] = useState('');
+  const [activity, setActivity] = useState('READY');
+  const [focus, setFocus] = useState<MapFocus>(null);
+  const [mobilePanel, setMobilePanel] = useState<'none' | 'contacts' | 'layers' | 'log'>('none');
+  const scanControllerRef = useRef<AbortController | null>(null);
+  const searchControllerRef = useRef<AbortController | null>(null);
 
-  const enriched = useMemo(() => features.map(feature => ({
+  const fetched = useMemo(() => allFeatures(state), [state.providers]);
+  const visible = useMemo(() => visibleFeatures(state), [state.providers, state.layers]);
+  const enriched = useMemo<EnrichedFeature[]>(() => visible.map(feature => ({
     ...feature,
-    distance: distanceMeters(origin.lat, origin.lon, feature.lat, feature.lon),
-    azimuth: bearingDegrees(origin.lat, origin.lon, feature.lat, feature.lon)
-  })).sort((a, b) => a.distance - b.distance), [features, origin]);
+    distance: distanceMeters(state.referenceOrigin.lat, state.referenceOrigin.lon, feature.lat, feature.lon),
+    azimuth: bearingDegrees(state.referenceOrigin.lat, state.referenceOrigin.lon, feature.lat, feature.lon)
+  })).sort((a, b) => a.distance - b.distance), [visible, state.referenceOrigin]);
+  const selected = enriched.find(feature => feature.id === state.selectionId) || null;
 
-  const selected = enriched.find(feature => feature.id === selectedId) || null;
-  const liveCount = enriched.filter(feature => feature.kind === 'live-feed').length;
-  const counts = useMemo(() => {
-    const result: Record<string, number> = {};
-    enriched.forEach(feature => {
-      const key = feature.kind === 'live-feed' ? 'live' : feature.cameraType || 'unknown';
-      result[key] = (result[key] || 0) + 1;
-    });
-    return result;
-  }, [enriched]);
+  const mediaCounts = useMemo(() => ({
+    snapshot: visible.filter(feature => feature.mediaType === 'snapshot').length,
+    stream: visible.filter(feature => feature.mediaType === 'stream').length,
+    mapped: visible.filter(feature => feature.mediaType === 'none' || feature.mediaType === 'external').length,
+    speed: visible.filter(feature => feature.cameraType === 'speed').length
+  }), [visible]);
 
-  useEffect(() => {
-    autoRadiusRef.current = autoRadius;
-  }, [autoRadius]);
+  const addLog = useCallback((channel: string, message: string, level: 'info' | 'warn' | 'error' = 'info') => {
+    dispatch({ type: 'LOG', entry: logEntry(channel, message, level) });
+  }, []);
 
   useEffect(() => {
-    detectMode().then(result => {
-      setMode(result);
-      setLogs(previous => [`MODE    ${result === 'local' ? 'LOCAL FASTAPI DETECTED' : 'STATIC GITHUB-PAGES CAPABLE'}`, ...previous]);
+    detectMode().then(mode => {
+      dispatch({ type: 'MODE_SET', mode });
+      addLog('MODE', mode === 'local' ? 'LOCAL FASTAPI DETECTED' : 'STATIC GITHUB PAGES MODE');
     });
     const timer = window.setInterval(() => setClock(new Date()), 1000);
-    return () => clearInterval(timer);
-  }, []);
-
-  useEffect(() => {
-    if (!mapContainer.current || mapRef.current) return;
-    const map = new maplibregl.Map({
-      container: mapContainer.current,
-      center: [origin.lon, origin.lat],
-      zoom: 13.4,
-      attributionControl: false,
-      style: {
-        version: 8,
-        sources: {
-          osm: {
-            type: 'raster',
-            tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
-            tileSize: 256,
-            attribution: '© OpenStreetMap contributors'
-          }
-        },
-        layers: [
-          { id: 'osm', type: 'raster', source: 'osm', paint: { 'raster-saturation': -0.85, 'raster-brightness-min': 0.12, 'raster-brightness-max': 0.48, 'raster-contrast': 0.3, 'raster-hue-rotate': 70 } }
-        ]
-      }
-    });
-    map.addControl(new maplibregl.NavigationControl({ showCompass: true }), 'top-right');
-
-    const syncScanArea = () => {
-      const center = map.getCenter();
-      setOrigin({ lat: center.lat, lon: center.lng });
-      if (autoRadiusRef.current) setRadius(viewportRadius(map));
+    return () => {
+      window.clearInterval(timer);
+      scanControllerRef.current?.abort();
+      searchControllerRef.current?.abort();
     };
-
-    map.on('load', () => {
-      map.addSource('contacts', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
-      map.addLayer({
-        id: 'contacts-heat', type: 'heatmap', source: 'contacts', maxzoom: 16,
-        paint: { 'heatmap-weight': 0.75, 'heatmap-intensity': 1.1, 'heatmap-radius': 28, 'heatmap-opacity': 0 }
-      });
-      map.addLayer({
-        id: 'contacts', type: 'circle', source: 'contacts',
-        paint: {
-          'circle-radius': ['case', ['==', ['get', 'selected'], true], 8, ['==', ['get', 'kind'], 'live-feed'], 6, 5],
-          'circle-color': ['case', ['==', ['get', 'selected'], true], '#62f2ff', ['==', ['get', 'kind'], 'live-feed'], '#65f0b5', '#ffc857'],
-          'circle-stroke-color': '#07100d',
-          'circle-stroke-width': 2,
-          'circle-opacity': 0.95
-        }
-      });
-      map.on('click', 'contacts', event => {
-        const id = event.features?.[0]?.properties?.id;
-        if (id) setSelectedId(String(id));
-      });
-      map.on('mouseenter', 'contacts', () => { map.getCanvas().style.cursor = 'pointer'; });
-      map.on('mouseleave', 'contacts', () => { map.getCanvas().style.cursor = ''; });
-      updateMapSources(map, features, selectedId, origin, radius, ringsEnabled, heatEnabled);
-      syncScanArea();
-    });
-    map.on('moveend', syncScanArea);
-    mapRef.current = map;
-    return () => { map.remove(); mapRef.current = null; };
-  }, []);
+  }, [addLog]);
 
   useEffect(() => {
-    const map = mapRef.current;
-    if (!map || !map.isStyleLoaded()) return;
-    updateMapSources(map, features, selectedId, origin, radius, ringsEnabled, heatEnabled);
-  }, [features, selectedId, origin, radius, ringsEnabled, heatEnabled]);
-
-  async function runScan() {
-    if (mode === 'detecting') return;
-    setStatus('SCANNING');
-    setScanActive(true);
-    setLogs(previous => [`SCAN    ${radius}M @ ${origin.lat.toFixed(4)}, ${origin.lon.toFixed(4)}`, ...previous].slice(0, 10));
-    try {
-      const result = await scanArea(mode, origin.lat, origin.lon, radius, liveEnabled);
-      setFeatures(result);
-      setSelectedId(result[0]?.id || null);
-      setStatus('READY');
-      const publicLive = result.filter(feature => feature.kind === 'live-feed').length;
-      setLogs(previous => [`MAP     ${result.length} CONTACTS / ${publicLive} PUBLIC LIVE CAMS`, ...previous].slice(0, 10));
-    } catch (error) {
-      setStatus('SOURCE ERROR');
-      setLogs(previous => [`ERROR   ${error instanceof Error ? error.message : 'SCAN FAILED'}`, ...previous].slice(0, 10));
-    } finally {
-      window.setTimeout(() => setScanActive(false), 500);
+    if (state.selectionId && !visible.some(feature => feature.id === state.selectionId)) {
+      dispatch({ type: 'SELECT', id: null });
     }
-  }
+  }, [state.selectionId, visible]);
+
+  const runScan = useCallback(async (reason: 'manual' | 'auto' = 'manual') => {
+    if (state.mode === 'detecting') return;
+    scanControllerRef.current?.abort();
+    const controller = new AbortController();
+    scanControllerRef.current = controller;
+    const id = scanId();
+    const providers = activeProviders(state.viewport.bounds);
+    const activeIds = providers.map(provider => provider.id);
+    const allIds = ravenProviders.map(provider => provider.id);
+    const startedAt = Date.now();
+
+    dispatch({
+      type: 'SCAN_BEGIN',
+      id,
+      bounds: state.viewport.bounds,
+      center: state.viewport.center,
+      activeProviderIds: activeIds,
+      allProviderIds: allIds,
+      timestamp: startedAt
+    });
+    setActivity('SCANNING');
+    addLog('SCAN', `${reason.toUpperCase()} · ${activeIds.join(' + ') || 'NO PROVIDERS'} · z${state.viewport.zoom.toFixed(1)}`);
+
+    const results = await Promise.all(providers.map(async provider => {
+      try {
+        const result = await provider.scan({ mode: state.mode, bounds: state.viewport.bounds }, controller.signal);
+        if (controller.signal.aborted || scanControllerRef.current !== controller) return { providerId: provider.id, status: 'aborted' as const };
+        dispatch({
+          type: 'PROVIDER_SUCCESS',
+          scanId: id,
+          providerId: provider.id,
+          features: result.features,
+          pages: result.pages,
+          timestamp: Date.now()
+        });
+        addLog(provider.id.toUpperCase(), `${result.features.length} CONTACTS${result.pages && result.pages > 1 ? ` · ${result.pages} PAGES` : ''}`);
+        return { providerId: provider.id, status: 'ready' as const, count: result.features.length };
+      } catch (error) {
+        if (controller.signal.aborted || abortError(error)) return { providerId: provider.id, status: 'aborted' as const };
+        const message = error instanceof Error ? error.message : 'Provider scan failed';
+        dispatch({ type: 'PROVIDER_ERROR', scanId: id, providerId: provider.id, error: message, timestamp: Date.now() });
+        addLog(provider.id.toUpperCase(), message, 'error');
+        return { providerId: provider.id, status: 'error' as const };
+      }
+    }));
+
+    if (controller.signal.aborted || scanControllerRef.current !== controller) return;
+    const ready = results.filter(result => result.status === 'ready').length;
+    const errors = results.filter(result => result.status === 'error').length;
+    const finalStatus = ready === 0 && errors > 0 ? 'error' : errors > 0 ? 'partial' : 'ready';
+    dispatch({ type: 'SCAN_FINISH', scanId: id, status: finalStatus, timestamp: Date.now() });
+    setActivity('READY');
+    addLog('SCAN', finalStatus === 'partial' ? 'COMPLETE WITH PROVIDER ERRORS' : finalStatus === 'error' ? 'FAILED' : 'COMPLETE', finalStatus === 'error' ? 'error' : finalStatus === 'partial' ? 'warn' : 'info');
+  }, [state.mode, state.viewport.bounds, state.viewport.center, state.viewport.zoom, addLog]);
+
+  useEffect(() => {
+    if (!state.autoScan || state.mode === 'detecting' || state.scan.status !== 'dirty') return;
+    const timer = window.setTimeout(() => void runScan('auto'), 800);
+    return () => window.clearTimeout(timer);
+  }, [state.autoScan, state.mode, state.scan.status, state.viewport.bounds, runScan]);
+
+  const handleViewport = useCallback((viewport: RavenViewport) => {
+    dispatch({ type: 'VIEWPORT_CHANGED', viewport });
+  }, []);
 
   async function submitSearch(event: FormEvent) {
     event.preventDefault();
-    if (!query.trim()) return;
-    setStatus('SEARCHING');
+    if (!query.trim() || state.mode === 'detecting') return;
+    searchControllerRef.current?.abort();
+    const controller = new AbortController();
+    searchControllerRef.current = controller;
+    setActivity('SEARCHING');
     try {
-      const result = await searchPlace(query.trim());
+      const result = await searchPlace(state.mode, query.trim(), controller.signal);
       if (!result) throw new Error('No matching location');
-      const next = { lat: result.lat, lon: result.lon };
-      setOrigin(next);
-      mapRef.current?.flyTo({ center: [next.lon, next.lat], zoom: 14 });
-      setLogs(previous => [`SEARCH  ${result.label.toUpperCase().slice(0, 58)}`, ...previous].slice(0, 10));
-      setStatus('READY');
+      addLog('SEARCH', result.label.toUpperCase().slice(0, 72));
+      setFocus({ lat: result.lat, lon: result.lon, zoom: 14, token: Date.now() });
     } catch (error) {
-      setStatus('SOURCE ERROR');
-      setLogs(previous => [`ERROR   ${error instanceof Error ? error.message : 'SEARCH FAILED'}`, ...previous].slice(0, 10));
+      if (!abortError(error)) addLog('SEARCH', error instanceof Error ? error.message : 'Search failed', 'error');
+    } finally {
+      if (!controller.signal.aborted) setActivity('READY');
     }
   }
 
   function useGps() {
     if (!navigator.geolocation) {
-      setLogs(previous => ['GPS     GEOLOCATION UNAVAILABLE', ...previous].slice(0, 10));
+      addLog('GPS', 'GEOLOCATION UNAVAILABLE', 'error');
       return;
     }
-    setStatus('LOCATING');
+    setActivity('LOCATING');
     navigator.geolocation.getCurrentPosition(position => {
-      const next = { lat: position.coords.latitude, lon: position.coords.longitude };
-      setOrigin(next);
-      mapRef.current?.flyTo({ center: [next.lon, next.lat], zoom: 15 });
-      setStatus('READY');
-      setLogs(previous => ['GPS     ORIGIN UPDATED', ...previous].slice(0, 10));
-    }, () => {
-      setStatus('READY');
-      setLogs(previous => ['GPS     PERMISSION DENIED / UNAVAILABLE', ...previous].slice(0, 10));
+      const point = { lat: position.coords.latitude, lon: position.coords.longitude };
+      dispatch({ type: 'REFERENCE_ORIGIN_SET', point, source: 'gps' });
+      setFocus({ ...point, zoom: 15, token: Date.now() });
+      addLog('GPS', 'REFERENCE ORIGIN UPDATED');
+      setActivity('READY');
+    }, error => {
+      addLog('GPS', error.message || 'PERMISSION DENIED / UNAVAILABLE', 'error');
+      setActivity('READY');
     }, { enableHighAccuracy: true, timeout: 8000 });
   }
 
-  function toggleAutoRadius() {
-    setAutoRadius(previous => {
-      const next = !previous;
-      autoRadiusRef.current = next;
-      if (next && mapRef.current) setRadius(viewportRadius(mapRef.current));
-      return next;
-    });
+  function useScanOrigin() {
+    const point = state.scan.center || state.viewport.center;
+    dispatch({ type: 'REFERENCE_ORIGIN_SET', point, source: 'scan' });
+    addLog('ORIGIN', 'DISTANCE / AZIMUTH REFERENCE SET TO SCAN CENTER');
   }
 
-  function toggleLive() {
-    setLiveEnabled(previous => {
-      const next = !previous;
-      if (!next) setFeatures(current => current.filter(feature => feature.kind !== 'live-feed'));
-      setLogs(current => [`LIVE    PUBLIC CAMERA LAYER ${next ? 'ENABLED' : 'DISABLED'}`, ...current].slice(0, 10));
-      return next;
-    });
+  function toggleLayer(layer: LayerKey) {
+    dispatch({ type: 'LAYER_TOGGLE', layer });
+    addLog('LAYER', `${layer.toUpperCase()} TOGGLED`);
   }
+
+  const statusLabel = activity !== 'READY' ? activity : ({
+    idle: 'READY TO SCAN',
+    dirty: 'RESULTS STALE',
+    scanning: 'SCANNING',
+    partial: 'PARTIAL',
+    ready: 'READY',
+    error: 'SOURCE ERROR'
+  } as const)[state.scan.status];
+
+  const statusBad = state.scan.status === 'error';
+  const statusWarn = state.scan.status === 'dirty' || state.scan.status === 'partial';
 
   return (
-    <div className={`raven-shell ${scanActive ? 'scanning' : ''}`}>
+    <div className={`raven-shell scan-${state.scan.status}`}>
       <header className="top-hud panel">
         <div className="brand-block"><div className="brand-mark">R</div><div><strong>RAVEN</strong><span>OPEN-DATA AWARENESS GRID</span></div></div>
-        <HudMetric label="ORIGIN" value={`${origin.lat.toFixed(4)}, ${origin.lon.toFixed(4)}`} />
+        <HudMetric label="REFERENCE ORIGIN" value={`${state.referenceOrigin.lat.toFixed(4)}, ${state.referenceOrigin.lon.toFixed(4)}`} sub={state.referenceOrigin.source.toUpperCase()} />
         <HudMetric label="GRID TIME" value={`${clock.toISOString().slice(11, 19)} UTC`} />
-        <HudMetric label="RADIUS" value={`${formatRange(radius)}${autoRadius ? ' AUTO' : ''}`} />
-        <HudMetric label="CONTACTS" value={String(enriched.length).padStart(3, '0')} />
-        <form className="search-box" onSubmit={submitSearch}><input value={query} onChange={e => setQuery(e.target.value)} placeholder="SEARCH CITY / ADDRESS / COORDINATES" /><button>GO</button></form>
-        <div className="system-block"><span>SYSTEM</span><strong className={status.includes('ERROR') ? 'bad' : ''}>● {status}</strong><small>MODE {mode.toUpperCase()}</small></div>
+        <HudMetric label="VIEW" value={`z${state.viewport.zoom.toFixed(1)}`} sub={state.scan.status === 'dirty' ? 'STALE' : 'SYNC'} />
+        <HudMetric label="VISIBLE" value={String(enriched.length).padStart(4, '0')} sub={`${fetched.length} FETCHED`} />
+        <form className="search-box" onSubmit={submitSearch}><input aria-label="Search city, address, or coordinates" value={query} onChange={event => setQuery(event.target.value)} placeholder="SEARCH CITY / ADDRESS / LAT,LON" /><button type="submit">GO</button></form>
+        <div className="system-block"><span>SYSTEM</span><strong className={statusBad ? 'bad' : statusWarn ? 'warn' : ''}>● {statusLabel}</strong><small>MODE {state.mode.toUpperCase()}</small></div>
       </header>
 
-      <aside className="contact-register panel">
-        <div className="panel-title"><span>CONTACT REGISTER</span><small>{enriched.length} TRACKED</small></div>
-        <div className="contact-list">
-          {enriched.length === 0 && <div className="empty-state">NO PUBLIC CONTACTS IN CURRENT RESULT</div>}
-          {enriched.map((feature, index) => (
-            <button key={feature.id} className={`contact-row ${selectedId === feature.id ? 'active' : ''}`} onClick={() => { setSelectedId(feature.id); mapRef.current?.flyTo({ center: [feature.lon, feature.lat], zoom: 16 }); }}>
-              <span className="contact-index">{String(index + 1).padStart(3, '0')}</span>
-              <span className="contact-main"><strong>{feature.name || 'CAMERA'}</strong><small>RNG {formatRange(feature.distance)} · AZ {Math.round(feature.azimuth)}°</small></span>
-              <span className="contact-tag">{typeLabel(feature)}</span>
-            </button>
-          ))}
-        </div>
+      <aside className={`contact-register panel ${mobilePanel === 'contacts' ? 'mobile-open' : ''}`}>
+        <div className="panel-title"><span>CONTACT REGISTER</span><small>{enriched.length} VISIBLE</small><button className="mobile-close" onClick={() => setMobilePanel('none')}>×</button></div>
+        <VirtualContactList features={enriched} selectedId={state.selectionId} onSelect={id => dispatch({ type: 'SELECT', id })} />
       </aside>
 
       <main className="map-stage">
-        <div ref={mapContainer} className="map-canvas" />
+        <RavenMap
+          features={visible}
+          selectedId={state.selectionId}
+          scanBounds={state.scan.bounds}
+          heatEnabled={state.layers.heat}
+          outlineEnabled={state.layers.scanOutline}
+          focus={focus}
+          onViewportChange={handleViewport}
+          onSelect={id => dispatch({ type: 'SELECT', id })}
+        />
         <div className="map-grid-overlay" />
         <div className="origin-reticle" aria-hidden="true"><span /><span /></div>
-        {scanActive && <div className="scan-sweep" />}
+        {state.scan.status === 'scanning' && <div className="scan-sweep" />}
+        {state.scan.status === 'dirty' && <div className="stale-banner">VIEWPORT CHANGED · RESULTS ARE FROM THE PREVIOUS SCAN <button onClick={() => void runScan('manual')}>RESCAN</button></div>}
         {selected && (
           <section className="detail-card panel">
-            <div className="panel-title"><span>CONTACT DETAIL</span><button onClick={() => setSelectedId(null)}>×</button></div>
-            <strong className="detail-name">{selected.name}</strong>
-            {selected.snapshotUrl && <img src={selected.snapshotUrl} alt={`Public camera snapshot for ${selected.name || selected.sourceId || 'camera'}`} style={{ width: '100%', aspectRatio: '16 / 9', objectFit: 'cover', display: 'block', borderTop: '1px solid rgba(102,247,184,.24)' }} />}
+            <div className="panel-title"><span>CONTACT DETAIL</span><button onClick={() => dispatch({ type: 'SELECT', id: null })}>×</button></div>
+            <strong className="detail-name">{selected.name || 'CAMERA'}</strong>
+            <CameraViewer feature={selected} />
             <dl>
-              <div><dt>TYPE</dt><dd>{typeLabel(selected)}</dd></div>
+              <div><dt>CLASS</dt><dd>{typeLabel(selected)}</dd></div>
               <div><dt>RANGE</dt><dd>{formatRange(selected.distance)}</dd></div>
               <div><dt>AZIMUTH</dt><dd>{Math.round(selected.azimuth)}°</dd></div>
               <div><dt>COORD</dt><dd>{selected.lat.toFixed(6)}, {selected.lon.toFixed(6)}</dd></div>
-              <div><dt>DIRECTION</dt><dd>{selected.bearing === undefined ? 'UNKNOWN' : `${selected.bearing}°`}</dd></div>
+              <div><dt>DIRECTION</dt><dd>{selected.directionLabel || (selected.bearing === undefined ? 'UNKNOWN' : `${selected.bearing}°`)}</dd></div>
               <div><dt>OPERATOR</dt><dd>{selected.operator || 'UNSPECIFIED'}</dd></div>
-              {selected.status && <div><dt>FEED</dt><dd>{selected.status}</dd></div>}
-              {selected.sourceUpdatedAt && <div><dt>UPDATED</dt><dd>{selected.sourceUpdatedAt}</dd></div>}
+              <div><dt>PROVIDER</dt><dd>{providerById(selected.providerId)?.name || selected.providerId}</dd></div>
+              {selected.sourceUpdatedAt && <div><dt>SOURCE UPDATE</dt><dd>{selected.sourceUpdatedAt}</dd></div>}
             </dl>
             <div className="detail-source">{selected.attribution || selected.providerId}</div>
-            {selected.sourceUrl && <a href={selected.sourceUrl} target="_blank" rel="noreferrer">{selected.kind === 'live-feed' ? 'OPEN PUBLIC CAMERA' : 'OPEN PUBLIC SOURCE'} ↗</a>}
+            {selected.sourceUrl && <a href={selected.sourceUrl} target="_blank" rel="noreferrer">OPEN OFFICIAL / PUBLIC SOURCE ↗</a>}
           </section>
         )}
       </main>
 
-      <aside className="analytics-rail panel">
-        <MetricCard label="DETECTED / LOADED" value={String(enriched.length)} sub={features.some(feature => feature.providerId === 'demo') ? 'DEMO UNTIL SCAN' : 'CURRENT RESULT'} />
-        <MetricCard label="PUBLIC LIVE" value={String(liveCount)} sub={liveEnabled ? 'FL511 LAYER ENABLED' : 'LAYER DISABLED'} />
-        <section className="analytics-card"><div className="section-label">CLASSIFICATION</div>{TYPE_ORDER.filter(type => counts[type]).map(type => <ClassBar key={type} label={type.toUpperCase()} value={counts[type] || 0} total={Math.max(enriched.length, 1)} />)}</section>
-        <MetricCard label="NEAREST" value={enriched[0] ? formatRange(enriched[0].distance) : '—'} sub={enriched[0] ? typeLabel(enriched[0]) : 'NO CONTACT'} />
-        <section className="analytics-card"><div className="section-label">DATA HEALTH</div><div className="health-line"><span>MODE</span><strong>{mode.toUpperCase()}</strong></div><div className="health-line"><span>PROVIDERS</span><strong>{liveEnabled ? 'OSM + FL511' : 'OSM / OVERPASS'}</strong></div><div className="health-line"><span>STATE</span><strong>{status}</strong></div></section>
+      <aside className={`analytics-rail panel ${mobilePanel === 'layers' ? 'mobile-open' : ''}`}>
+        <div className="mobile-panel-head"><span>ANALYTICS / LAYERS</span><button onClick={() => setMobilePanel('none')}>×</button></div>
+        <MetricCard label="VISIBLE CONTACTS" value={String(enriched.length)} sub={`${fetched.length} FETCHED`} />
+        <section className="analytics-card classification-grid">
+          <div className="section-label">MEDIA / CLASSIFICATION</div>
+          <ClassCount label="MAPPED" value={mediaCounts.mapped} />
+          <ClassCount label="SNAPSHOT" value={mediaCounts.snapshot} />
+          <ClassCount label="STREAM" value={mediaCounts.stream} />
+          <ClassCount label="SPEED" value={mediaCounts.speed} />
+        </section>
+        <MetricCard label="NEAREST" value={enriched[0] ? formatRange(enriched[0].distance) : '—'} sub={enriched[0] ? typeLabel(enriched[0]) : 'NO VISIBLE CONTACT'} />
+        <section className="analytics-card provider-health">
+          <div className="section-label">PROVIDER HEALTH</div>
+          {ravenProviders.map(provider => {
+            const run = state.providers[provider.id];
+            const label = run?.status || 'idle';
+            return <div className={`health-line status-${label}`} key={provider.id}><span>{provider.name}</span><strong>{label.toUpperCase()}{run?.features.length ? ` · ${run.features.length}` : ''}</strong>{run?.error && <small>{run.error}</small>}</div>;
+          })}
+        </section>
+        <LayerPanel
+          layers={state.layers}
+          autoScan={state.autoScan}
+          onToggle={toggleLayer}
+          onAutoScan={value => { dispatch({ type: 'AUTO_SCAN_SET', value }); addLog('SCAN', `AUTO SCAN ${value ? 'ENABLED' : 'DISABLED'}`); }}
+        />
       </aside>
 
-      <section className="system-log panel">
-        <div className="panel-title"><span>SYSTEM LOG</span><small>SESSION</small></div>
-        <div className="log-lines">{logs.map((line, index) => <div key={`${line}-${index}`}><span>{new Date(Date.now() - index * 1000).toISOString().slice(11, 19)}</span>{line}</div>)}</div>
+      <section className={`system-log panel ${mobilePanel === 'log' ? 'mobile-open' : ''}`}>
+        <div className="panel-title"><span>SYSTEM LOG</span><small>{state.logs.length} EVENTS</small><button className="mobile-close" onClick={() => setMobilePanel('none')}>×</button></div>
+        <div className="log-lines">{state.logs.map(entry => <div key={entry.id} className={`log-${entry.level}`}><span>{new Date(entry.timestamp).toISOString().slice(11, 19)}</span><b>{entry.channel.padEnd(8, ' ')}</b>{entry.message}</div>)}</div>
       </section>
 
       <footer className="command-bar panel">
-        <button className="command primary" onClick={runScan}>SCAN AREA</button>
-        <button className="command" onClick={useGps}>GPS</button>
-        <button className={`command ${liveEnabled ? 'on' : ''}`} onClick={toggleLive}>LIVE</button>
-        <button className={`command ${ringsEnabled ? 'on' : ''}`} onClick={() => setRingsEnabled(value => !value)}>RINGS</button>
-        <button className={`command ${heatEnabled ? 'on' : ''}`} onClick={() => setHeatEnabled(value => !value)}>HEAT</button>
-        <button className={`command ${autoRadius ? 'on' : ''}`} onClick={toggleAutoRadius}>AUTO RANGE</button>
-        <label className="radius-control"><span>SCAN RADIUS {autoRadius ? 'AUTO' : 'MANUAL'}</span><input type="range" min="250" max="50000" step="250" value={radius} onChange={e => { setAutoRadius(false); autoRadiusRef.current = false; setRadius(Number(e.target.value)); }} /><strong>{formatRange(radius)}</strong></label>
-        <div className="command-note">PUBLIC / OPEN DATA ONLY</div>
+        <button className="command primary" disabled={state.mode === 'detecting' || state.scan.status === 'scanning'} onClick={() => void runScan('manual')}>SCAN VIEW</button>
+        <button className="command" onClick={useGps}>GPS ORIGIN</button>
+        <button className="command" onClick={useScanOrigin}>SCAN ORIGIN</button>
+        <button className={`command ${state.autoScan ? 'on' : ''}`} aria-pressed={state.autoScan} onClick={() => dispatch({ type: 'AUTO_SCAN_SET', value: !state.autoScan })}>AUTO SCAN</button>
+        <div className="scan-readout"><span>SCAN MODEL</span><strong>VISIBLE BOUNDS · z{state.viewport.zoom.toFixed(1)}</strong></div>
+        <div className="command-note">PUBLIC / OPEN DATA ONLY · © OPENSTREETMAP CONTRIBUTORS · FL511 / FDOT</div>
       </footer>
+
+      <nav className="mobile-toolbar" aria-label="Raven mobile panels">
+        <button onClick={() => setMobilePanel('contacts')}>CONTACTS</button>
+        <button onClick={() => setMobilePanel('layers')}>LAYERS</button>
+        <button onClick={() => setMobilePanel('log')}>LOG</button>
+        <button onClick={() => void runScan('manual')}>SCAN</button>
+      </nav>
     </div>
   );
 }
 
-function HudMetric({ label, value }: { label: string; value: string }) {
-  return <div className="hud-metric"><span>{label}</span><strong>{value}</strong></div>;
+function HudMetric({ label, value, sub }: { label: string; value: string; sub?: string }) {
+  return <div className="hud-metric"><span>{label}</span><strong>{value}</strong>{sub && <small>{sub}</small>}</div>;
 }
 function MetricCard({ label, value, sub }: { label: string; value: string; sub: string }) {
   return <section className="analytics-card metric-card"><div className="section-label">{label}</div><strong>{value}</strong><small>{sub}</small></section>;
 }
-function ClassBar({ label, value, total }: { label: string; value: number; total: number }) {
-  return <div className="class-bar"><div><span>{label}</span><strong>{value}</strong></div><div className="bar-track"><span style={{ width: `${Math.max(6, value / total * 100)}%` }} /></div></div>;
-}
-
-function updateMapSources(map: MapLibreMap, features: RavenFeature[], selectedId: string | null, origin: { lat: number; lon: number }, radius: number, ringsEnabled: boolean, heatEnabled: boolean) {
-  const source = map.getSource('contacts') as GeoJSONSource | undefined;
-  if (source) {
-    source.setData({
-      type: 'FeatureCollection',
-      features: features.map(feature => ({
-        type: 'Feature',
-        geometry: { type: 'Point', coordinates: [feature.lon, feature.lat] },
-        properties: { id: feature.id, selected: feature.id === selectedId, type: feature.cameraType || 'unknown', kind: feature.kind }
-      }))
-    });
-  }
-  if (map.getLayer('contacts-heat')) map.setPaintProperty('contacts-heat', 'heatmap-opacity', heatEnabled ? 0.72 : 0);
-
-  const ringId = 'scan-ring';
-  const ringSourceId = 'scan-ring-source';
-  const ringData = circleGeoJson(origin.lon, origin.lat, radius);
-  const ringSource = map.getSource(ringSourceId) as GeoJSONSource | undefined;
-  if (ringSource) ringSource.setData(ringData);
-  else if (map.isStyleLoaded()) {
-    map.addSource(ringSourceId, { type: 'geojson', data: ringData });
-    map.addLayer({ id: ringId, type: 'line', source: ringSourceId, paint: { 'line-color': '#5ef0b7', 'line-width': 1.25, 'line-opacity': ringsEnabled ? 0.7 : 0, 'line-dasharray': [2, 2] } });
-  }
-  if (map.getLayer(ringId)) map.setPaintProperty(ringId, 'line-opacity', ringsEnabled ? 0.7 : 0);
-}
-
-function circleGeoJson(lon: number, lat: number, radiusMeters: number): any {
-  const points: [number, number][] = [];
-  const steps = 96;
-  const earth = 6378137;
-  const angular = radiusMeters / earth;
-  const latRad = toRad(lat);
-  const lonRad = toRad(lon);
-  for (let i = 0; i <= steps; i++) {
-    const bearing = 2 * Math.PI * i / steps;
-    const pointLat = Math.asin(Math.sin(latRad) * Math.cos(angular) + Math.cos(latRad) * Math.sin(angular) * Math.cos(bearing));
-    const pointLon = lonRad + Math.atan2(Math.sin(bearing) * Math.sin(angular) * Math.cos(latRad), Math.cos(angular) - Math.sin(latRad) * Math.sin(pointLat));
-    points.push([toDeg(pointLon), toDeg(pointLat)]);
-  }
-  return { type: 'Feature', properties: {}, geometry: { type: 'Polygon', coordinates: [points] } };
+function ClassCount({ label, value }: { label: string; value: number }) {
+  return <div className="class-count"><span>{label}</span><strong>{value}</strong></div>;
 }

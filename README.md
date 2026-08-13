@@ -1,55 +1,110 @@
 # Raven
 
-Raven is a map-first open-data awareness dashboard with one frontend and two deployment modes.
+Raven is a map-first public/open-data camera awareness dashboard with one React frontend and two execution modes:
 
-- **Raven Web** runs as a static GitHub Pages application. It uses browser-safe public APIs and local browser storage.
-- **Raven Local** serves the same compiled WebUI from a Python/FastAPI process and adds server-side provider access, SQLite caching, and room for future local-only integrations.
+- **Raven Web**: static GitHub Pages application using browser-accessible public sources.
+- **Raven Local**: the same compiled WebUI served by Python/FastAPI, with server-side OpenStreetMap/Overpass access, SQLite caching, and cached geocoding.
 
-Raven is designed around public/openly documented data. It does not probe private camera systems or bypass authentication.
+Raven does not probe private camera systems, bypass authentication, or discover cameras by scanning networks. Camera media is only embedded when the source deliberately publishes it publicly.
 
-## Current working features
+## Current architecture
 
-- Tactical full-screen Raven dashboard
-- MapLibre + OpenStreetMap basemap
-- Search through OpenStreetMap Nominatim
-- Browser geolocation
-- Scan-radius control and range ring
-- Contact register linked to map markers
-- Camera classification summary
-- Nearest-contact calculation
-- Selected-contact metadata panel
-- Heatmap toggle
-- OpenStreetMap surveillance/speed-camera scan through Overpass
-- Automatic `STATIC` vs `LOCAL` mode detection through `/api/health`
-- FastAPI local API with SQLite response cache
-- GitHub Pages deployment workflow
-- Windows Batch, PowerShell, and Linux/macOS local launch scripts
+Raven separates five concepts that must not mutate one another implicitly:
 
-## GitHub Pages mode
+1. **Viewport**: what the user is currently looking at.
+2. **Last scan**: the exact geographic bounds that were queried.
+3. **Reference origin**: the point used for range and azimuth calculations.
+4. **Provider data**: fetched camera records retained until the next scan.
+5. **Layer visibility**: a derived filter over provider data.
 
-The workflow in `.github/workflows/pages.yml` builds `frontend/` with the `/Raven/` base path and deploys `frontend/dist` to GitHub Pages whenever `main` is updated.
+This means turning a layer off hides its contacts without deleting them. Turning it back on restores the already-fetched contacts immediately and does not require another scan.
 
-For the repository's first Pages deployment, make sure GitHub Pages is enabled with **GitHub Actions** as the deployment source in repository settings.
+## Camera media semantics
 
-Expected public URL:
+Raven uses explicit media types:
+
+- `none`: mapped camera location with no public media URL.
+- `snapshot`: a public still-image endpoint such as an FL511 JPEG. Raven refreshes it periodically and preloads the next image before swapping frames.
+- `stream`: a continuous public video URL when a provider actually exposes one.
+- `external`: a public camera page exists but there is no embeddable media URL.
+
+FL511's public ArcGIS camera layer currently exposes an `IMAGE` field, so those cameras are classified as **SNAPSHOT**, not live video. Raven never labels a JPEG as a video stream.
+
+## Scan behavior
+
+`SCAN VIEW` queries the exact visible MapLibre bounding box rather than using an unrelated fixed radius.
+
+- Panning or zooming after a completed scan marks results **STALE**.
+- `AUTO SCAN` optionally performs a debounced rescan after viewport movement.
+- Starting a new scan aborts the previous one.
+- Provider responses are tagged with a unique `scanId`; late results from an obsolete scan are ignored.
+- Selecting a contact does not pan the map and therefore cannot silently change the scan area.
+- Provider failures are tracked separately. If one provider succeeds and another fails, Raven reports **PARTIAL** rather than falsely reporting READY.
+
+## Current providers
+
+### OpenStreetMap / Overpass
+
+Queries the exact visible bounding box for publicly mapped:
+
+- `man_made=surveillance`
+- `highway=speed_camera`
+
+Available worldwide where OpenStreetMap contains those records.
+
+### FL511 / Florida DOT
+
+Queries the public FL511 ArcGIS FeatureServer within Florida coverage. Raven supports ArcGIS pagination beyond the service's 2,000-record page size and records camera description, county, highway, direction, timestamp, coordinates, and public snapshot URL when supplied.
+
+## Map and UI behavior
+
+- Native MapLibre marker clustering at lower zoom levels.
+- Separate mapped-camera, snapshot, stream, and speed-camera visibility controls.
+- Heatmap and last-scan outline overlays.
+- Virtualized Contact Register for large result sets.
+- Provider health/error panel.
+- Real event timestamps in the system log.
+- Desktop tactical layout plus mobile Contacts, Layers, and Log drawers.
+- Explicit stale-results banner after viewport changes.
+- Visible OpenStreetMap attribution.
+- Application-level React error boundary.
+
+## Snapshot viewer
+
+Snapshot cameras default to a 5-second refresh interval. Available refresh settings are:
+
+```text
+OFF
+1s
+3s
+5s
+10s
+30s
+```
+
+The viewer preloads the next image before replacing the displayed frame, tracks consecutive image-load failures, and reports ACTIVE, STALE, or OFFLINE state. `sourceUpdatedAt` is displayed separately when the provider supplies it.
+
+## GitHub Pages
+
+The repository deploys from `.github/workflows/pages.yml`.
+
+Public URL:
 
 ```text
 https://uhuhuhuhuhuhuhuh.github.io/Raven/
 ```
 
-The static edition queries browser-accessible public sources directly. Providers that later require a server proxy should be exposed as local-only rather than silently failing.
+The deployment job now runs TypeScript checking and unit/state tests before building and publishing the Pages artifact.
 
 ## Local mode
 
 ### Windows
 
-Double-click or run:
-
 ```bat
 scripts\run-local.bat
 ```
 
-Or PowerShell:
+PowerShell:
 
 ```powershell
 ./scripts/run-local.ps1
@@ -61,13 +116,29 @@ Or PowerShell:
 ./scripts/run-local.sh
 ```
 
-The scripts create a Python virtual environment, install the FastAPI dependencies, build the frontend if necessary, and start Raven at:
+Local Raven is served at:
 
 ```text
 http://127.0.0.1:8742
 ```
 
-The frontend automatically calls `/api/health`. If Raven's backend answers, the HUD changes to `MODE LOCAL`; otherwise the frontend uses `MODE STATIC`.
+The frontend probes `/api/health`. If Raven's backend responds, the HUD shows `MODE LOCAL`; otherwise it operates as the static browser edition.
+
+## Local API
+
+```text
+GET /api/health
+GET /api/providers
+GET /api/scan?west=-80.3&south=25.7&east=-80.1&north=25.9
+GET /api/search?q=Miami
+GET /api/stats
+```
+
+The legacy local radius form remains accepted for compatibility:
+
+```text
+GET /api/scan?lat=25.7617&lon=-80.1918&radius=1800
+```
 
 ## Development
 
@@ -88,33 +159,51 @@ npm install
 npm run dev
 ```
 
-Vite proxies `/api` to `127.0.0.1:8742` while developing.
+Validation:
 
-## API
-
-Current local endpoints:
-
-```text
-GET /api/health
-GET /api/providers
-GET /api/scan?lat=25.7617&lon=-80.1918&radius=1800
-GET /api/stats
+```bash
+npm run typecheck
+npm test
+npm run build
+npm run test:e2e
 ```
 
-`/api/scan` normalizes public OpenStreetMap camera records into Raven's frontend schema and caches results in `server/data/raven.db`.
+## Quality gate
+
+Pull requests into `main` run `.github/workflows/quality.yml`, which performs:
+
+- frontend dependency installation
+- `tsc --noEmit`
+- Vitest state/provider tests
+- production Vite build
+- Playwright Chromium regression tests in desktop and mobile profiles
+- backend dependency installation
+- Python syntax validation
+- FastAPI `/api/health` smoke test
+- Unix launcher shell syntax validation
+
+The regression suite specifically verifies that snapshot visibility toggles are non-destructive and that moving the map after a completed scan marks the current data stale.
 
 ## Repository layout
 
 ```text
 Raven/
-├── frontend/               React + TypeScript + Vite + MapLibre
-├── server/                 FastAPI local backend
-├── scripts/                One-click local launchers
-├── .github/workflows/      GitHub Pages deployment
-├── RAVEN_WEBUI_PLAN.md     Full product/UX implementation plan
-└── README.md
+├── frontend/
+│   ├── src/
+│   │   ├── components/       map, media, layers, error handling, virtual list
+│   │   ├── providers/        provider adapters and registry
+│   │   ├── App.tsx
+│   │   ├── search.ts
+│   │   ├── state.ts
+│   │   └── types.ts
+│   ├── e2e/
+│   └── playwright.config.ts
+├── server/                   FastAPI local backend
+├── scripts/                  one-click local launchers
+├── .github/workflows/        quality gate + Pages deployment
+└── RAVEN_WEBUI_PLAN.md
 ```
 
-## Data-source note
+## Source and privacy policy
 
-The initial provider uses OpenStreetMap records tagged as surveillance equipment or speed cameras and queries them through the public Overpass API. Metadata is only displayed when present in the source data. Raven retains a link back to the original OpenStreetMap record and contributor attribution.
+Raven is intentionally limited to public/openly documented data and public media. It does not include credential bypass, private-IP probing, facial recognition, biometric identification, license-plate OCR, or network camera discovery. Location access is opt-in through the browser's normal geolocation permission flow.
