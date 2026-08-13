@@ -12,6 +12,10 @@ export type RavenFeature = {
   operator?: string;
   zone?: string;
   sourceUrl?: string;
+  snapshotUrl?: string;
+  feedUrl?: string;
+  sourceUpdatedAt?: string;
+  status?: string;
   attribution?: string;
   fetchedAt: string;
   metadata: Record<string, unknown>;
