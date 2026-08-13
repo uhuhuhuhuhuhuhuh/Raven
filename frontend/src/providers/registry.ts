@@ -4,7 +4,9 @@ import { fl511Provider } from './fl511';
 import { osmProvider } from './osm';
 import { providerEligibility, type RavenProvider } from './types';
 
-export const ravenProviders: RavenProvider[] = [osmProvider, fl511Provider, caltransProvider];
+const safeCaltransProvider: RavenProvider = { ...caltransProvider, minZoom: 6 };
+
+export const ravenProviders: RavenProvider[] = [osmProvider, fl511Provider, safeCaltransProvider];
 
 export function providerPlan(bounds: RavenBounds, zoom: number): {
   active: RavenProvider[];
