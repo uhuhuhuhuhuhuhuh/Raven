@@ -4,7 +4,8 @@ import { detectMode, scanArea, searchPlace } from './api';
 import type { RavenFeature, RavenMode } from './types';
 
 const DEFAULT_ORIGIN = { lat: 25.7617, lon: -80.1918 };
-const TYPE_ORDER = ['alpr', 'fixed', 'dome', 'ptz', 'panorama', 'speed', 'unknown'] as const;
+const TYPE_ORDER = ['live', 'alpr', 'fixed', 'dome', 'ptz', 'panorama', 'speed', 'unknown'] as const;
+const MAX_AUTO_RADIUS = 50000;
 
 function toRad(value: number) { return value * Math.PI / 180; }
 function toDeg(value: number) { return value * 180 / Math.PI; }
@@ -23,7 +24,14 @@ function bearingDegrees(aLat: number, aLon: number, bLat: number, bLon: number) 
   return (toDeg(Math.atan2(y, x)) + 360) % 360;
 }
 function formatRange(meters: number) { return meters >= 1000 ? `${(meters / 1000).toFixed(2)} km` : `${Math.round(meters)} m`; }
-function typeLabel(type?: RavenFeature['cameraType']) { return (type || 'unknown').toUpperCase(); }
+function typeLabel(feature: RavenFeature) { return feature.kind === 'live-feed' ? 'LIVE' : (feature.cameraType || 'unknown').toUpperCase(); }
+function viewportRadius(map: MapLibreMap) {
+  const center = map.getCenter();
+  const bounds = map.getBounds();
+  const corners = [bounds.getNorthEast(), bounds.getNorthWest(), bounds.getSouthEast(), bounds.getSouthWest()];
+  const farthest = Math.max(...corners.map(corner => distanceMeters(center.lat, center.lng, corner.lat, corner.lng)));
+  return Math.min(MAX_AUTO_RADIUS, Math.max(250, Math.ceil((farthest * 1.05) / 250) * 250));
+}
 
 const demoFeatures: RavenFeature[] = [
   { id: 'demo-1', providerId: 'demo', kind: 'camera', cameraType: 'fixed', name: 'Demo Fixed Camera', lat: 25.7682, lon: -80.1971, bearing: 145, attribution: 'Demo data', fetchedAt: new Date().toISOString(), metadata: {} },
@@ -34,9 +42,12 @@ const demoFeatures: RavenFeature[] = [
 export default function App() {
   const mapContainer = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
+  const autoRadiusRef = useRef(true);
   const [mode, setMode] = useState<RavenMode>('detecting');
   const [origin, setOrigin] = useState(DEFAULT_ORIGIN);
   const [radius, setRadius] = useState(1800);
+  const [autoRadius, setAutoRadius] = useState(true);
+  const [liveEnabled, setLiveEnabled] = useState(true);
   const [features, setFeatures] = useState<RavenFeature[]>(demoFeatures);
   const [selectedId, setSelectedId] = useState<string | null>(demoFeatures[0].id);
   const [status, setStatus] = useState('READY');
@@ -54,11 +65,19 @@ export default function App() {
   })).sort((a, b) => a.distance - b.distance), [features, origin]);
 
   const selected = enriched.find(feature => feature.id === selectedId) || null;
+  const liveCount = enriched.filter(feature => feature.kind === 'live-feed').length;
   const counts = useMemo(() => {
     const result: Record<string, number> = {};
-    enriched.forEach(feature => { const key = feature.cameraType || 'unknown'; result[key] = (result[key] || 0) + 1; });
+    enriched.forEach(feature => {
+      const key = feature.kind === 'live-feed' ? 'live' : feature.cameraType || 'unknown';
+      result[key] = (result[key] || 0) + 1;
+    });
     return result;
   }, [enriched]);
+
+  useEffect(() => {
+    autoRadiusRef.current = autoRadius;
+  }, [autoRadius]);
 
   useEffect(() => {
     detectMode().then(result => {
@@ -92,6 +111,13 @@ export default function App() {
       }
     });
     map.addControl(new maplibregl.NavigationControl({ showCompass: true }), 'top-right');
+
+    const syncScanArea = () => {
+      const center = map.getCenter();
+      setOrigin({ lat: center.lat, lon: center.lng });
+      if (autoRadiusRef.current) setRadius(viewportRadius(map));
+    };
+
     map.on('load', () => {
       map.addSource('contacts', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
       map.addLayer({
@@ -100,7 +126,13 @@ export default function App() {
       });
       map.addLayer({
         id: 'contacts', type: 'circle', source: 'contacts',
-        paint: { 'circle-radius': ['case', ['==', ['get', 'selected'], true], 8, 5], 'circle-color': ['case', ['==', ['get', 'selected'], true], '#62f2ff', '#ffc857'], 'circle-stroke-color': '#07100d', 'circle-stroke-width': 2, 'circle-opacity': 0.95 }
+        paint: {
+          'circle-radius': ['case', ['==', ['get', 'selected'], true], 8, ['==', ['get', 'kind'], 'live-feed'], 6, 5],
+          'circle-color': ['case', ['==', ['get', 'selected'], true], '#62f2ff', ['==', ['get', 'kind'], 'live-feed'], '#65f0b5', '#ffc857'],
+          'circle-stroke-color': '#07100d',
+          'circle-stroke-width': 2,
+          'circle-opacity': 0.95
+        }
       });
       map.on('click', 'contacts', event => {
         const id = event.features?.[0]?.properties?.id;
@@ -109,7 +141,9 @@ export default function App() {
       map.on('mouseenter', 'contacts', () => { map.getCanvas().style.cursor = 'pointer'; });
       map.on('mouseleave', 'contacts', () => { map.getCanvas().style.cursor = ''; });
       updateMapSources(map, features, selectedId, origin, radius, ringsEnabled, heatEnabled);
+      syncScanArea();
     });
+    map.on('moveend', syncScanArea);
     mapRef.current = map;
     return () => { map.remove(); mapRef.current = null; };
   }, []);
@@ -126,11 +160,12 @@ export default function App() {
     setScanActive(true);
     setLogs(previous => [`SCAN    ${radius}M @ ${origin.lat.toFixed(4)}, ${origin.lon.toFixed(4)}`, ...previous].slice(0, 10));
     try {
-      const result = await scanArea(mode, origin.lat, origin.lon, radius);
+      const result = await scanArea(mode, origin.lat, origin.lon, radius, liveEnabled);
       setFeatures(result);
       setSelectedId(result[0]?.id || null);
       setStatus('READY');
-      setLogs(previous => [`MAP     ${result.length} PUBLIC CONTACTS LOADED`, ...previous].slice(0, 10));
+      const publicLive = result.filter(feature => feature.kind === 'live-feed').length;
+      setLogs(previous => [`MAP     ${result.length} CONTACTS / ${publicLive} PUBLIC LIVE CAMS`, ...previous].slice(0, 10));
     } catch (error) {
       setStatus('SOURCE ERROR');
       setLogs(previous => [`ERROR   ${error instanceof Error ? error.message : 'SCAN FAILED'}`, ...previous].slice(0, 10));
@@ -175,13 +210,31 @@ export default function App() {
     }, { enableHighAccuracy: true, timeout: 8000 });
   }
 
+  function toggleAutoRadius() {
+    setAutoRadius(previous => {
+      const next = !previous;
+      autoRadiusRef.current = next;
+      if (next && mapRef.current) setRadius(viewportRadius(mapRef.current));
+      return next;
+    });
+  }
+
+  function toggleLive() {
+    setLiveEnabled(previous => {
+      const next = !previous;
+      if (!next) setFeatures(current => current.filter(feature => feature.kind !== 'live-feed'));
+      setLogs(current => [`LIVE    PUBLIC CAMERA LAYER ${next ? 'ENABLED' : 'DISABLED'}`, ...current].slice(0, 10));
+      return next;
+    });
+  }
+
   return (
     <div className={`raven-shell ${scanActive ? 'scanning' : ''}`}>
       <header className="top-hud panel">
         <div className="brand-block"><div className="brand-mark">R</div><div><strong>RAVEN</strong><span>OPEN-DATA AWARENESS GRID</span></div></div>
         <HudMetric label="ORIGIN" value={`${origin.lat.toFixed(4)}, ${origin.lon.toFixed(4)}`} />
         <HudMetric label="GRID TIME" value={`${clock.toISOString().slice(11, 19)} UTC`} />
-        <HudMetric label="RADIUS" value={formatRange(radius)} />
+        <HudMetric label="RADIUS" value={`${formatRange(radius)}${autoRadius ? ' AUTO' : ''}`} />
         <HudMetric label="CONTACTS" value={String(enriched.length).padStart(3, '0')} />
         <form className="search-box" onSubmit={submitSearch}><input value={query} onChange={e => setQuery(e.target.value)} placeholder="SEARCH CITY / ADDRESS / COORDINATES" /><button>GO</button></form>
         <div className="system-block"><span>SYSTEM</span><strong className={status.includes('ERROR') ? 'bad' : ''}>● {status}</strong><small>MODE {mode.toUpperCase()}</small></div>
@@ -195,7 +248,7 @@ export default function App() {
             <button key={feature.id} className={`contact-row ${selectedId === feature.id ? 'active' : ''}`} onClick={() => { setSelectedId(feature.id); mapRef.current?.flyTo({ center: [feature.lon, feature.lat], zoom: 16 }); }}>
               <span className="contact-index">{String(index + 1).padStart(3, '0')}</span>
               <span className="contact-main"><strong>{feature.name || 'CAMERA'}</strong><small>RNG {formatRange(feature.distance)} · AZ {Math.round(feature.azimuth)}°</small></span>
-              <span className="contact-tag">{typeLabel(feature.cameraType)}</span>
+              <span className="contact-tag">{typeLabel(feature)}</span>
             </button>
           ))}
         </div>
@@ -210,25 +263,29 @@ export default function App() {
           <section className="detail-card panel">
             <div className="panel-title"><span>CONTACT DETAIL</span><button onClick={() => setSelectedId(null)}>×</button></div>
             <strong className="detail-name">{selected.name}</strong>
+            {selected.snapshotUrl && <img src={selected.snapshotUrl} alt={`Public camera snapshot for ${selected.name || selected.sourceId || 'camera'}`} style={{ width: '100%', aspectRatio: '16 / 9', objectFit: 'cover', display: 'block', borderTop: '1px solid rgba(102,247,184,.24)' }} />}
             <dl>
-              <div><dt>TYPE</dt><dd>{typeLabel(selected.cameraType)}</dd></div>
+              <div><dt>TYPE</dt><dd>{typeLabel(selected)}</dd></div>
               <div><dt>RANGE</dt><dd>{formatRange(selected.distance)}</dd></div>
               <div><dt>AZIMUTH</dt><dd>{Math.round(selected.azimuth)}°</dd></div>
               <div><dt>COORD</dt><dd>{selected.lat.toFixed(6)}, {selected.lon.toFixed(6)}</dd></div>
               <div><dt>DIRECTION</dt><dd>{selected.bearing === undefined ? 'UNKNOWN' : `${selected.bearing}°`}</dd></div>
               <div><dt>OPERATOR</dt><dd>{selected.operator || 'UNSPECIFIED'}</dd></div>
+              {selected.status && <div><dt>FEED</dt><dd>{selected.status}</dd></div>}
+              {selected.sourceUpdatedAt && <div><dt>UPDATED</dt><dd>{selected.sourceUpdatedAt}</dd></div>}
             </dl>
             <div className="detail-source">{selected.attribution || selected.providerId}</div>
-            {selected.sourceUrl && <a href={selected.sourceUrl} target="_blank" rel="noreferrer">OPEN PUBLIC SOURCE ↗</a>}
+            {selected.sourceUrl && <a href={selected.sourceUrl} target="_blank" rel="noreferrer">{selected.kind === 'live-feed' ? 'OPEN PUBLIC CAMERA' : 'OPEN PUBLIC SOURCE'} ↗</a>}
           </section>
         )}
       </main>
 
       <aside className="analytics-rail panel">
         <MetricCard label="DETECTED / LOADED" value={String(enriched.length)} sub={features.some(feature => feature.providerId === 'demo') ? 'DEMO UNTIL SCAN' : 'CURRENT RESULT'} />
+        <MetricCard label="PUBLIC LIVE" value={String(liveCount)} sub={liveEnabled ? 'FL511 LAYER ENABLED' : 'LAYER DISABLED'} />
         <section className="analytics-card"><div className="section-label">CLASSIFICATION</div>{TYPE_ORDER.filter(type => counts[type]).map(type => <ClassBar key={type} label={type.toUpperCase()} value={counts[type] || 0} total={Math.max(enriched.length, 1)} />)}</section>
-        <MetricCard label="NEAREST" value={enriched[0] ? formatRange(enriched[0].distance) : '—'} sub={enriched[0] ? typeLabel(enriched[0].cameraType) : 'NO CONTACT'} />
-        <section className="analytics-card"><div className="section-label">DATA HEALTH</div><div className="health-line"><span>MODE</span><strong>{mode.toUpperCase()}</strong></div><div className="health-line"><span>PROVIDER</span><strong>OSM / OVERPASS</strong></div><div className="health-line"><span>STATE</span><strong>{status}</strong></div></section>
+        <MetricCard label="NEAREST" value={enriched[0] ? formatRange(enriched[0].distance) : '—'} sub={enriched[0] ? typeLabel(enriched[0]) : 'NO CONTACT'} />
+        <section className="analytics-card"><div className="section-label">DATA HEALTH</div><div className="health-line"><span>MODE</span><strong>{mode.toUpperCase()}</strong></div><div className="health-line"><span>PROVIDERS</span><strong>{liveEnabled ? 'OSM + FL511' : 'OSM / OVERPASS'}</strong></div><div className="health-line"><span>STATE</span><strong>{status}</strong></div></section>
       </aside>
 
       <section className="system-log panel">
@@ -239,9 +296,11 @@ export default function App() {
       <footer className="command-bar panel">
         <button className="command primary" onClick={runScan}>SCAN AREA</button>
         <button className="command" onClick={useGps}>GPS</button>
+        <button className={`command ${liveEnabled ? 'on' : ''}`} onClick={toggleLive}>LIVE</button>
         <button className={`command ${ringsEnabled ? 'on' : ''}`} onClick={() => setRingsEnabled(value => !value)}>RINGS</button>
         <button className={`command ${heatEnabled ? 'on' : ''}`} onClick={() => setHeatEnabled(value => !value)}>HEAT</button>
-        <label className="radius-control"><span>SCAN RADIUS</span><input type="range" min="250" max="10000" step="250" value={radius} onChange={e => setRadius(Number(e.target.value))} /><strong>{formatRange(radius)}</strong></label>
+        <button className={`command ${autoRadius ? 'on' : ''}`} onClick={toggleAutoRadius}>AUTO RANGE</button>
+        <label className="radius-control"><span>SCAN RADIUS {autoRadius ? 'AUTO' : 'MANUAL'}</span><input type="range" min="250" max="50000" step="250" value={radius} onChange={e => { setAutoRadius(false); autoRadiusRef.current = false; setRadius(Number(e.target.value)); }} /><strong>{formatRange(radius)}</strong></label>
         <div className="command-note">PUBLIC / OPEN DATA ONLY</div>
       </footer>
     </div>
@@ -266,7 +325,7 @@ function updateMapSources(map: MapLibreMap, features: RavenFeature[], selectedId
       features: features.map(feature => ({
         type: 'Feature',
         geometry: { type: 'Point', coordinates: [feature.lon, feature.lat] },
-        properties: { id: feature.id, selected: feature.id === selectedId, type: feature.cameraType || 'unknown' }
+        properties: { id: feature.id, selected: feature.id === selectedId, type: feature.cameraType || 'unknown', kind: feature.kind }
       }))
     });
   }
