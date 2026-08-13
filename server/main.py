@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import sqlite3
 import time
@@ -18,9 +19,12 @@ ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = Path(os.getenv("RAVEN_DB", ROOT / "server" / "data" / "raven.db"))
 FRONTEND_DIST = ROOT / "frontend" / "dist"
 OVERPASS_URL = os.getenv("RAVEN_OVERPASS_URL", "https://overpass-api.de/api/interpreter")
+NOMINATIM_URL = os.getenv("RAVEN_NOMINATIM_URL", "https://nominatim.openstreetmap.org/search")
 CACHE_TTL = int(os.getenv("RAVEN_CACHE_TTL", "300"))
+SEARCH_CACHE_TTL = int(os.getenv("RAVEN_SEARCH_CACHE_TTL", "86400"))
+USER_AGENT = "Raven/1.0 (+https://github.com/uhuhuhuhuhuhuhuh/Raven)"
 
-app = FastAPI(title="Raven Local API", version="0.1.0")
+app = FastAPI(title="Raven Local API", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
@@ -44,6 +48,28 @@ def db() -> sqlite3.Connection:
     )
     connection.commit()
     return connection
+
+
+def read_cache(key: str, ttl: int) -> Any | None:
+    with db() as connection:
+        row = connection.execute("SELECT payload, created_at FROM cache WHERE cache_key = ?", (key,)).fetchone()
+    if not row or int(time.time()) - int(row[1]) > ttl:
+        return None
+    return json.loads(row[0])
+
+
+def write_cache(key: str, payload: Any) -> None:
+    with db() as connection:
+        connection.execute(
+            "INSERT OR REPLACE INTO cache(cache_key, payload, created_at) VALUES (?, ?, ?)",
+            (key, json.dumps(payload), int(time.time())),
+        )
+        connection.commit()
+
+
+def stable_key(prefix: str, *parts: Any) -> str:
+    raw = ":".join([prefix, *[str(part) for part in parts]])
+    return hashlib.sha256(raw.encode()).hexdigest()
 
 
 def parse_bearing(raw: str | None) -> float | None:
@@ -84,11 +110,14 @@ def normalize(element: dict[str, Any]) -> dict[str, Any] | None:
         "sourceId": str(element_id),
         "kind": "camera",
         "cameraType": camera_type(tags),
+        "mediaType": "none",
+        "mediaHealth": "unknown",
         "name": tags.get("name") or tags.get("ref") or tags.get("operator") or "Mapped camera",
         "lat": element["lat"],
         "lon": element["lon"],
         "address": address,
         "bearing": parse_bearing(tags.get("direction")),
+        "directionLabel": tags.get("direction"),
         "operator": tags.get("operator"),
         "zone": tags.get("surveillance:zone"),
         "sourceUrl": f"https://www.openstreetmap.org/{element_type}/{element_id}",
@@ -98,26 +127,17 @@ def normalize(element: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def cache_key(lat: float, lon: float, radius: int) -> str:
-    raw = f"osm:{lat:.4f}:{lon:.4f}:{radius}"
-    return hashlib.sha256(raw.encode()).hexdigest()
+def bounds_from_legacy(lat: float, lon: float, radius: int) -> tuple[float, float, float, float]:
+    lat_delta = radius / 111_320
+    cos_lat = max(math.cos(math.radians(lat)), 0.2)
+    lon_delta = radius / (111_320 * cos_lat)
+    return lon - lon_delta, lat - lat_delta, lon + lon_delta, lat + lat_delta
 
 
-def read_cache(key: str) -> list[dict[str, Any]] | None:
-    with db() as connection:
-        row = connection.execute("SELECT payload, created_at FROM cache WHERE cache_key = ?", (key,)).fetchone()
-    if not row or int(time.time()) - row[1] > CACHE_TTL:
-        return None
-    return json.loads(row[0])
-
-
-def write_cache(key: str, features: list[dict[str, Any]]) -> None:
-    with db() as connection:
-        connection.execute(
-            "INSERT OR REPLACE INTO cache(cache_key, payload, created_at) VALUES (?, ?, ?)",
-            (key, json.dumps(features), int(time.time())),
-        )
-        connection.commit()
+def validate_bounds(west: float, south: float, east: float, north: float) -> tuple[float, float, float, float]:
+    if west >= east or south >= north:
+        raise HTTPException(status_code=422, detail="Invalid viewport bounds")
+    return west, south, east, north
 
 
 @app.get("/api/health")
@@ -125,7 +145,7 @@ def health() -> dict[str, Any]:
     return {
         "service": "raven",
         "mode": "local",
-        "version": "0.1.0",
+        "version": "1.0.0",
         "database": str(DB_PATH),
         "frontendBuilt": (FRONTEND_DIST / "index.html").exists(),
     }
@@ -138,33 +158,55 @@ def providers() -> dict[str, Any]:
             {
                 "id": "osm-overpass",
                 "name": "OpenStreetMap / Overpass",
-                "capabilities": ["camera-map", "direction", "operator", "camera-type"],
+                "capabilities": ["mapped-camera", "direction", "operator", "camera-type"],
                 "enabled": True,
-                "mode": "local",
-            }
+                "execution": "server",
+            },
+            {
+                "id": "fl511-public-cameras",
+                "name": "FL511 Traffic Cameras",
+                "capabilities": ["snapshot", "direction", "operator"],
+                "enabled": True,
+                "execution": "browser",
+            },
         ]
     }
 
 
 @app.get("/api/scan")
 async def scan(
-    lat: float = Query(ge=-90, le=90),
-    lon: float = Query(ge=-180, le=180),
-    radius: int = Query(default=1800, ge=100, le=20000),
+    west: float | None = Query(default=None, ge=-180, le=180),
+    south: float | None = Query(default=None, ge=-90, le=90),
+    east: float | None = Query(default=None, ge=-180, le=180),
+    north: float | None = Query(default=None, ge=-90, le=90),
+    lat: float | None = Query(default=None, ge=-90, le=90),
+    lon: float | None = Query(default=None, ge=-180, le=180),
+    radius: int | None = Query(default=None, ge=100, le=250_000),
 ) -> dict[str, Any]:
-    key = cache_key(lat, lon, radius)
-    cached = read_cache(key)
-    if cached is not None:
-        return {"origin": {"lat": lat, "lon": lon}, "radius": radius, "features": cached, "cached": True}
+    supplied_bounds = all(value is not None for value in (west, south, east, north))
+    supplied_legacy = lat is not None and lon is not None and radius is not None
+    if supplied_bounds:
+        bbox = validate_bounds(float(west), float(south), float(east), float(north))
+    elif supplied_legacy:
+        bbox = validate_bounds(*bounds_from_legacy(float(lat), float(lon), int(radius)))
+    else:
+        raise HTTPException(status_code=422, detail="Supply west/south/east/north or legacy lat/lon/radius")
 
+    west_v, south_v, east_v, north_v = bbox
+    key = stable_key("osm-bbox", f"{west_v:.5f}", f"{south_v:.5f}", f"{east_v:.5f}", f"{north_v:.5f}")
+    cached = read_cache(key, CACHE_TTL)
+    if cached is not None:
+        return {"bounds": {"west": west_v, "south": south_v, "east": east_v, "north": north_v}, "features": cached, "cached": True}
+
+    bbox_text = f"{south_v},{west_v},{north_v},{east_v}"
     query = (
         f'[out:json][timeout:25];('
-        f'node["man_made"="surveillance"](around:{radius},{lat},{lon});'
-        f'node["highway"="speed_camera"](around:{radius},{lat},{lon});'
+        f'node["man_made"="surveillance"]({bbox_text});'
+        f'node["highway"="speed_camera"]({bbox_text});'
         f');out body;'
     )
     try:
-        async with httpx.AsyncClient(timeout=35.0, headers={"User-Agent": "Raven/0.1 open-data dashboard"}) as client:
+        async with httpx.AsyncClient(timeout=35.0, headers={"User-Agent": USER_AGENT}) as client:
             response = await client.post(OVERPASS_URL, data={"data": query})
             response.raise_for_status()
             payload = response.json()
@@ -173,14 +215,42 @@ async def scan(
 
     features = [item for element in payload.get("elements", []) if (item := normalize(element)) is not None]
     write_cache(key, features)
-    return {"origin": {"lat": lat, "lon": lon}, "radius": radius, "features": features, "cached": False}
+    return {"bounds": {"west": west_v, "south": south_v, "east": east_v, "north": north_v}, "features": features, "cached": False}
+
+
+@app.get("/api/search")
+async def search(q: str = Query(min_length=1, max_length=300)) -> dict[str, Any]:
+    normalized_query = " ".join(q.split())
+    key = stable_key("search", normalized_query.lower())
+    cached = read_cache(key, SEARCH_CACHE_TTL)
+    if cached is not None:
+        return {"result": cached, "cached": True}
+
+    params = {"q": normalized_query, "format": "jsonv2", "limit": "1"}
+    try:
+        async with httpx.AsyncClient(timeout=15.0, headers={"User-Agent": USER_AGENT, "Accept-Language": "en"}) as client:
+            response = await client.get(NOMINATIM_URL, params=params)
+            response.raise_for_status()
+            payload = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail=f"Search provider failed: {exc}") from exc
+
+    result = None
+    if payload:
+        result = {
+            "lat": float(payload[0]["lat"]),
+            "lon": float(payload[0]["lon"]),
+            "label": str(payload[0].get("display_name") or normalized_query),
+        }
+    write_cache(key, result)
+    return {"result": result, "cached": False}
 
 
 @app.get("/api/stats")
 def stats() -> dict[str, Any]:
     with db() as connection:
         cache_rows = connection.execute("SELECT COUNT(*) FROM cache").fetchone()[0]
-    return {"cacheEntries": cache_rows, "cacheTtlSeconds": CACHE_TTL}
+    return {"cacheEntries": cache_rows, "cameraCacheTtlSeconds": CACHE_TTL, "searchCacheTtlSeconds": SEARCH_CACHE_TTL}
 
 
 if FRONTEND_DIST.exists():
