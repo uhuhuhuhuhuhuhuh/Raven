@@ -82,6 +82,7 @@ export const fl511Provider: RavenProvider = {
   attribution: 'FL511 / Florida Department of Transportation',
   capabilities: ['snapshot', 'direction', 'operator'],
   coverage: FLORIDA_BOUNDS,
+  minZoom: 6,
   cacheTtlMs: 60 * 1000,
   async scan(request, signal) {
     const clipped = clipBounds(request.bounds, FLORIDA_BOUNDS);
