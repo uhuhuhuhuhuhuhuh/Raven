@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { hasSnapshot, hasStream } from '../state';
 import type { RavenFeature } from '../types';
 
 export type EnrichedFeature = RavenFeature & { distance: number; azimuth: number };
@@ -11,10 +12,19 @@ function formatRange(meters: number) {
 }
 
 function typeLabel(feature: RavenFeature) {
-  if (feature.mediaType === 'snapshot') return 'SNAP';
-  if (feature.mediaType === 'stream') return 'STREAM';
+  const stream = hasStream(feature);
+  const snapshot = hasSnapshot(feature);
+  if (stream && snapshot) return 'STREAM+SNAP';
+  if (stream) return 'STREAM';
+  if (snapshot) return 'SNAP';
   if (feature.cameraType === 'speed') return 'SPEED';
   return (feature.cameraType || 'unknown').toUpperCase();
+}
+
+function mediaClass(feature: RavenFeature) {
+  if (hasStream(feature)) return 'stream';
+  if (hasSnapshot(feature)) return 'snapshot';
+  return feature.mediaType;
 }
 
 export function VirtualContactList({
@@ -66,7 +76,7 @@ export function VirtualContactList({
                   <strong>{feature.name || 'CAMERA'}</strong>
                   <small>RNG {formatRange(feature.distance)} · AZ {Math.round(feature.azimuth)}°</small>
                 </span>
-                <span className={`contact-tag media-${feature.mediaType}`}>{typeLabel(feature)}</span>
+                <span className={`contact-tag media-${mediaClass(feature)}`}>{typeLabel(feature)}</span>
               </button>
             );
           })}

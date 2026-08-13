@@ -14,12 +14,19 @@ const speed: RavenFeature = {
   id: 'speed-1', providerId: 'osm-overpass', kind: 'camera', cameraType: 'speed', mediaType: 'none',
   name: 'Speed Camera', lat: 25.78, lon: -80.17, fetchedAt: new Date().toISOString(), metadata: {}
 };
+const streamWithSnapshot: RavenFeature = {
+  id: 'stream-1', providerId: 'caltrans-cctv', kind: 'camera', cameraType: 'fixed', mediaType: 'stream',
+  name: 'Stream Camera', lat: 34.05, lon: -118.25, snapshotUrl: 'https://example.test/fallback.jpg',
+  streamPageUrl: 'https://cwwp2.dot.ca.gov/vm/loc/d7/test.htm', fetchedAt: new Date().toISOString(), metadata: {}
+};
 
 function loadedState() {
   let state = createInitialState();
   state = ravenReducer(state, {
     type: 'SCAN_BEGIN', id: 'scan-a', bounds: state.viewport.bounds, center: state.viewport.center,
-    activeProviderIds: ['osm-overpass', 'fl511-public-cameras'], allProviderIds: ['osm-overpass', 'fl511-public-cameras'], timestamp: 1
+    activeProviderIds: ['osm-overpass', 'fl511-public-cameras'],
+    allProviderIds: ['osm-overpass', 'fl511-public-cameras', 'caltrans-cctv'],
+    skipReasons: { 'caltrans-cctv': 'OUTSIDE COVERAGE' }, timestamp: 1
   });
   state = ravenReducer(state, { type: 'PROVIDER_SUCCESS', scanId: 'scan-a', providerId: 'osm-overpass', features: [mapped, speed], timestamp: 2 });
   state = ravenReducer(state, { type: 'PROVIDER_SUCCESS', scanId: 'scan-a', providerId: 'fl511-public-cameras', features: [snapshot], timestamp: 2 });
@@ -32,11 +39,9 @@ describe('Raven state invariants', () => {
     let state = loadedState();
     expect(allFeatures(state)).toHaveLength(3);
     expect(visibleFeatures(state).some(feature => feature.id === snapshot.id)).toBe(true);
-
     state = ravenReducer(state, { type: 'LAYER_SET', layer: 'snapshots', value: false });
     expect(allFeatures(state)).toHaveLength(3);
     expect(visibleFeatures(state).some(feature => feature.id === snapshot.id)).toBe(false);
-
     state = ravenReducer(state, { type: 'LAYER_SET', layer: 'snapshots', value: true });
     expect(visibleFeatures(state).some(feature => feature.id === snapshot.id)).toBe(true);
   });
@@ -54,7 +59,7 @@ describe('Raven state invariants', () => {
     let state = loadedState();
     state = ravenReducer(state, {
       type: 'SCAN_BEGIN', id: 'scan-b', bounds: state.viewport.bounds, center: state.viewport.center,
-      activeProviderIds: ['osm-overpass'], allProviderIds: ['osm-overpass', 'fl511-public-cameras'], timestamp: 4
+      activeProviderIds: ['osm-overpass'], allProviderIds: ['osm-overpass', 'fl511-public-cameras', 'caltrans-cctv'], timestamp: 4
     });
     state = ravenReducer(state, { type: 'PROVIDER_SUCCESS', scanId: 'scan-a', providerId: 'osm-overpass', features: [mapped], timestamp: 5 });
     expect(state.providers['osm-overpass'].scanId).toBe('scan-b');
@@ -74,5 +79,33 @@ describe('Raven state invariants', () => {
     const next = ravenReducer(state, { type: 'SELECT', id: snapshot.id });
     expect(next.viewport).toEqual(state.viewport);
     expect(next.scan.bounds).toEqual(state.scan.bounds);
+  });
+
+  it('shows a dual-capability stream camera when either its stream or snapshot layer is enabled', () => {
+    let state = loadedState();
+    state = ravenReducer(state, {
+      type: 'PROVIDER_SUCCESS', scanId: 'scan-a', providerId: 'caltrans-cctv', features: [streamWithSnapshot], timestamp: 4
+    });
+    state = ravenReducer(state, { type: 'LAYER_SET', layer: 'streams', value: false });
+    expect(visibleFeatures(state).some(feature => feature.id === streamWithSnapshot.id)).toBe(true);
+    state = ravenReducer(state, { type: 'LAYER_SET', layer: 'snapshots', value: false });
+    expect(visibleFeatures(state).some(feature => feature.id === streamWithSnapshot.id)).toBe(false);
+    state = ravenReducer(state, { type: 'LAYER_SET', layer: 'streams', value: true });
+    expect(visibleFeatures(state).some(feature => feature.id === streamWithSnapshot.id)).toBe(true);
+  });
+
+  it('preserves progressive provider results while a provider is loading', () => {
+    let state = loadedState();
+    state = ravenReducer(state, {
+      type: 'SCAN_BEGIN', id: 'scan-c', bounds: state.viewport.bounds, center: state.viewport.center,
+      activeProviderIds: ['osm-overpass'], allProviderIds: ['osm-overpass'], timestamp: 10
+    });
+    state = ravenReducer(state, {
+      type: 'PROVIDER_PROGRESS', scanId: 'scan-c', providerId: 'osm-overpass', features: [mapped],
+      progress: { completed: 1, total: 4 }, timestamp: 11
+    });
+    expect(state.providers['osm-overpass'].status).toBe('loading');
+    expect(state.providers['osm-overpass'].features).toEqual([mapped]);
+    expect(state.providers['osm-overpass'].progress).toEqual({ completed: 1, total: 4 });
   });
 });

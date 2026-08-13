@@ -1,5 +1,5 @@
 import type { RavenFeature } from '../types';
-import type { RavenProvider } from './types';
+import { clipBounds, type RavenProvider } from './types';
 
 const FL511_CAMERAS = 'https://services.arcgis.com/3wFbqsFPLeKqOlIK/arcgis/rest/services/FL511_Traffic_Cameras/FeatureServer/0/query';
 const FLORIDA_BOUNDS = { west: -87.7, south: 24.3, east: -79.7, north: 31.2 };
@@ -45,7 +45,7 @@ function normalizeFeature(feature: any): RavenFeature | null {
     directionLabel,
     operator: 'FL511 / Florida DOT',
     zone: attributes.COUNTY,
-    sourceUrl: 'https://fl511.com/',
+    sourceUrl: 'https://fl511.com/cctv',
     snapshotUrl,
     sourceUpdatedAt: attributes.TIMESTAMP ? String(attributes.TIMESTAMP) : undefined,
     attribution: 'FL511 / Florida Department of Transportation',
@@ -82,10 +82,13 @@ export const fl511Provider: RavenProvider = {
   attribution: 'FL511 / Florida Department of Transportation',
   capabilities: ['snapshot', 'direction', 'operator'],
   coverage: FLORIDA_BOUNDS,
+  cacheTtlMs: 60 * 1000,
   async scan(request, signal) {
-    const { west, south, east, north } = request.bounds;
+    const clipped = clipBounds(request.bounds, FLORIDA_BOUNDS);
+    if (!clipped) return { features: [], pages: 0 };
+    const { west, south, east, north } = clipped;
     const envelope = [west, south, east, north].join(',');
-    const collected: RavenFeature[] = [];
+    const deduped = new Map<string, RavenFeature>();
     let pages = 0;
 
     for (let offset = 0; pages < MAX_PAGES; offset += PAGE_SIZE) {
@@ -95,14 +98,12 @@ export const fl511Provider: RavenProvider = {
       const normalized = (payload.features || [])
         .map(normalizeFeature)
         .filter((feature: RavenFeature | null): feature is RavenFeature => Boolean(feature));
-      collected.push(...normalized);
-
+      for (const feature of normalized) deduped.set(feature.id, feature);
       const more = Boolean(payload.exceededTransferLimit) || (payload.features || []).length >= PAGE_SIZE;
+      request.onProgress?.(Array.from(deduped.values()), { completed: pages, total: more ? pages + 1 : pages });
       if (!more || (payload.features || []).length === 0) break;
     }
 
-    const deduped = new Map<string, RavenFeature>();
-    for (const feature of collected) deduped.set(feature.id, feature);
     return { features: Array.from(deduped.values()), pages };
   }
 };

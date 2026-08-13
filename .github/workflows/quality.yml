@@ -16,13 +16,18 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
       - name: Install frontend dependencies
         working-directory: frontend
-        run: npm install --no-audit --no-fund
+        run: npm ci --no-audit --no-fund
       - name: Typecheck
         working-directory: frontend
         run: npm run typecheck
-      - name: Unit and state tests
+      - name: Lint
+        working-directory: frontend
+        run: npm run lint
+      - name: Unit, provider, and cache tests
         working-directory: frontend
         run: npm test
       - name: Production build
@@ -48,16 +53,21 @@ jobs:
         run: python -m pip install -r server/requirements.txt
       - name: Python syntax check
         run: python -m py_compile server/main.py
-      - name: FastAPI health smoke test
+      - name: FastAPI health and provider smoke test
         run: |
           python - <<'PY'
           from fastapi.testclient import TestClient
           from server.main import app
-          response = TestClient(app).get('/api/health')
+          client = TestClient(app)
+          response = client.get('/api/health')
           assert response.status_code == 200, response.text
           payload = response.json()
           assert payload['service'] == 'raven'
-          assert payload['version'] == '1.0.0'
+          assert payload['version'] == '1.1.0'
+          providers = client.get('/api/providers')
+          assert providers.status_code == 200, providers.text
+          ids = {item['id'] for item in providers.json()['providers']}
+          assert {'osm-overpass', 'fl511-public-cameras', 'caltrans-cctv'} <= ids
           PY
       - name: Launcher syntax check
         run: bash -n scripts/run-local.sh

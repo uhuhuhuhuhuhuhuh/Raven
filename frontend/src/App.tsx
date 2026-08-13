@@ -1,11 +1,12 @@
 import { FormEvent, useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
+import { clearProviderCache, getCachedProviderScan, putCachedProviderScan } from './cache';
 import { CameraViewer } from './components/CameraViewer';
 import { LayerPanel } from './components/LayerPanel';
 import { RavenMap, type MapFocus } from './components/RavenMap';
 import { VirtualContactList, type EnrichedFeature } from './components/VirtualContactList';
-import { activeProviders, providerById, ravenProviders } from './providers/registry';
+import { providerById, providerPlan, ravenProviders } from './providers/registry';
 import { searchPlace } from './search';
-import { allFeatures, createInitialState, logEntry, ravenReducer, visibleFeatures } from './state';
+import { allFeatures, createInitialState, hasSnapshot, hasStream, logEntry, ravenReducer, visibleFeatures } from './state';
 import type { LayerKey, RavenFeature, RavenMode, RavenViewport } from './types';
 
 function toRad(value: number) { return value * Math.PI / 180; }
@@ -26,8 +27,8 @@ function bearingDegrees(aLat: number, aLon: number, bLat: number, bLon: number) 
 }
 function formatRange(meters: number) { return meters >= 1000 ? `${(meters / 1000).toFixed(2)} km` : `${Math.round(meters)} m`; }
 function typeLabel(feature: RavenFeature) {
-  if (feature.mediaType === 'snapshot') return 'SNAPSHOT';
-  if (feature.mediaType === 'stream') return 'STREAM';
+  if (hasStream(feature)) return 'STREAM';
+  if (hasSnapshot(feature)) return 'SNAPSHOT';
   if (feature.mediaType === 'external') return 'EXTERNAL';
   return (feature.cameraType || 'unknown').toUpperCase();
 }
@@ -76,9 +77,9 @@ export default function App() {
   const selected = enriched.find(feature => feature.id === state.selectionId) || null;
 
   const mediaCounts = useMemo(() => ({
-    snapshot: visible.filter(feature => feature.mediaType === 'snapshot').length,
-    stream: visible.filter(feature => feature.mediaType === 'stream').length,
-    mapped: visible.filter(feature => feature.mediaType === 'none' || feature.mediaType === 'external').length,
+    snapshot: visible.filter(hasSnapshot).length,
+    stream: visible.filter(hasStream).length,
+    mapped: visible.filter(feature => !hasSnapshot(feature) && !hasStream(feature)).length,
     speed: visible.filter(feature => feature.cameraType === 'speed').length
   }), [visible]);
 
@@ -111,8 +112,8 @@ export default function App() {
     const controller = new AbortController();
     scanControllerRef.current = controller;
     const id = scanId();
-    const providers = activeProviders(state.viewport.bounds);
-    const activeIds = providers.map(provider => provider.id);
+    const plan = providerPlan(state.viewport.bounds, state.viewport.zoom);
+    const activeIds = plan.active.map(provider => provider.id);
     const allIds = ravenProviders.map(provider => provider.id);
     const startedAt = Date.now();
 
@@ -123,14 +124,56 @@ export default function App() {
       center: state.viewport.center,
       activeProviderIds: activeIds,
       allProviderIds: allIds,
+      skipReasons: plan.skipped,
       timestamp: startedAt
     });
     setActivity('SCANNING');
-    addLog('SCAN', `${reason.toUpperCase()} · ${activeIds.join(' + ') || 'NO PROVIDERS'} · z${state.viewport.zoom.toFixed(1)}`);
+    addLog('SCAN', `${reason.toUpperCase()} · ${activeIds.join(' + ') || 'NO ELIGIBLE PROVIDERS'} · z${state.viewport.zoom.toFixed(1)}`);
 
-    const results = await Promise.all(providers.map(async provider => {
+    const results = await Promise.all(plan.active.map(async provider => {
+      let cachedFeatures: RavenFeature[] | null = null;
+      let cachedPages: number | undefined;
+      const cacheTtl = provider.cacheTtlMs ?? 5 * 60 * 1000;
+
       try {
-        const result = await provider.scan({ mode: state.mode, bounds: state.viewport.bounds }, controller.signal);
+        const cached = await getCachedProviderScan(provider.id, state.viewport.bounds, cacheTtl);
+        if (cached && !controller.signal.aborted && scanControllerRef.current === controller) {
+          cachedFeatures = cached.features;
+          cachedPages = cached.pages;
+          dispatch({
+            type: 'PROVIDER_PROGRESS',
+            scanId: id,
+            providerId: provider.id,
+            features: cached.features,
+            progress: { completed: 0, total: 1 },
+            pages: cached.pages,
+            fromCache: true,
+            timestamp: Date.now()
+          });
+          addLog(provider.id.toUpperCase(), `${cached.features.length} CONTACTS RESTORED FROM CACHE`);
+        }
+      } catch {
+        // Cache is an optimization. Network scanning continues normally.
+      }
+
+      try {
+        const result = await provider.scan({
+          mode: state.mode,
+          bounds: state.viewport.bounds,
+          zoom: state.viewport.zoom,
+          onProgress: (features, progress) => {
+            if (controller.signal.aborted || scanControllerRef.current !== controller) return;
+            dispatch({
+              type: 'PROVIDER_PROGRESS',
+              scanId: id,
+              providerId: provider.id,
+              features,
+              progress,
+              pages: progress.completed,
+              timestamp: Date.now()
+            });
+          }
+        }, controller.signal);
         if (controller.signal.aborted || scanControllerRef.current !== controller) return { providerId: provider.id, status: 'aborted' as const };
         dispatch({
           type: 'PROVIDER_SUCCESS',
@@ -140,11 +183,26 @@ export default function App() {
           pages: result.pages,
           timestamp: Date.now()
         });
-        addLog(provider.id.toUpperCase(), `${result.features.length} CONTACTS${result.pages && result.pages > 1 ? ` · ${result.pages} PAGES` : ''}`);
+        void putCachedProviderScan(provider.id, state.viewport.bounds, result.features, result.pages);
+        addLog(provider.id.toUpperCase(), `${result.features.length} CONTACTS${result.pages && result.pages > 1 ? ` · ${result.pages} TILES/PAGES` : ''}`);
         return { providerId: provider.id, status: 'ready' as const, count: result.features.length };
       } catch (error) {
         if (controller.signal.aborted || abortError(error)) return { providerId: provider.id, status: 'aborted' as const };
         const message = error instanceof Error ? error.message : 'Provider scan failed';
+        if (cachedFeatures) {
+          dispatch({
+            type: 'PROVIDER_SUCCESS',
+            scanId: id,
+            providerId: provider.id,
+            features: cachedFeatures,
+            pages: cachedPages,
+            warning: `NETWORK REFRESH FAILED · CACHED DATA SHOWN · ${message}`,
+            fromCache: true,
+            timestamp: Date.now()
+          });
+          addLog(provider.id.toUpperCase(), `NETWORK FAILED · USING CACHED DATA · ${message}`, 'warn');
+          return { providerId: provider.id, status: 'cached' as const };
+        }
         dispatch({ type: 'PROVIDER_ERROR', scanId: id, providerId: provider.id, error: message, timestamp: Date.now() });
         addLog(provider.id.toUpperCase(), message, 'error');
         return { providerId: provider.id, status: 'error' as const };
@@ -152,12 +210,12 @@ export default function App() {
     }));
 
     if (controller.signal.aborted || scanControllerRef.current !== controller) return;
-    const ready = results.filter(result => result.status === 'ready').length;
-    const errors = results.filter(result => result.status === 'error').length;
-    const finalStatus = ready === 0 && errors > 0 ? 'error' : errors > 0 ? 'partial' : 'ready';
+    const usable = results.filter(result => result.status === 'ready' || result.status === 'cached').length;
+    const degraded = results.filter(result => result.status === 'error' || result.status === 'cached').length;
+    const finalStatus = usable === 0 && degraded > 0 ? 'error' : degraded > 0 ? 'partial' : 'ready';
     dispatch({ type: 'SCAN_FINISH', scanId: id, status: finalStatus, timestamp: Date.now() });
     setActivity('READY');
-    addLog('SCAN', finalStatus === 'partial' ? 'COMPLETE WITH PROVIDER ERRORS' : finalStatus === 'error' ? 'FAILED' : 'COMPLETE', finalStatus === 'error' ? 'error' : finalStatus === 'partial' ? 'warn' : 'info');
+    addLog('SCAN', finalStatus === 'partial' ? 'COMPLETE WITH DEGRADED PROVIDERS' : finalStatus === 'error' ? 'FAILED' : 'COMPLETE', finalStatus === 'error' ? 'error' : finalStatus === 'partial' ? 'warn' : 'info');
   }, [state.mode, state.viewport.bounds, state.viewport.center, state.viewport.zoom, addLog]);
 
   useEffect(() => {
@@ -216,6 +274,11 @@ export default function App() {
   function toggleLayer(layer: LayerKey) {
     dispatch({ type: 'LAYER_TOGGLE', layer });
     addLog('LAYER', `${layer.toUpperCase()} TOGGLED`);
+  }
+
+  async function clearCache() {
+    await clearProviderCache();
+    addLog('CACHE', 'BROWSER PROVIDER CACHE CLEARED');
   }
 
   const statusLabel = activity !== 'READY' ? activity : ({
@@ -277,6 +340,7 @@ export default function App() {
               <div><dt>PROVIDER</dt><dd>{providerById(selected.providerId)?.name || selected.providerId}</dd></div>
               {selected.sourceUpdatedAt && <div><dt>SOURCE UPDATE</dt><dd>{selected.sourceUpdatedAt}</dd></div>}
             </dl>
+            <details className="debug-details"><summary>PROVIDER / RAW METADATA</summary><pre>{JSON.stringify(selected.metadata, null, 2)}</pre></details>
             <div className="detail-source">{selected.attribution || selected.providerId}</div>
             {selected.sourceUrl && <a href={selected.sourceUrl} target="_blank" rel="noreferrer">OPEN OFFICIAL / PUBLIC SOURCE ↗</a>}
           </section>
@@ -299,7 +363,14 @@ export default function App() {
           {ravenProviders.map(provider => {
             const run = state.providers[provider.id];
             const label = run?.status || 'idle';
-            return <div className={`health-line status-${label}`} key={provider.id}><span>{provider.name}</span><strong>{label.toUpperCase()}{run?.features.length ? ` · ${run.features.length}` : ''}</strong>{run?.error && <small>{run.error}</small>}</div>;
+            const progress = run?.progress ? ` · ${run.progress.completed}/${run.progress.total}` : '';
+            return <div className={`health-line status-${label}`} key={provider.id}>
+              <span>{provider.name}</span>
+              <strong>{label.toUpperCase()}{run?.features.length ? ` · ${run.features.length}` : ''}{progress}{run?.fromCache ? ' · CACHE' : ''}</strong>
+              {run?.skipReason && <small>{run.skipReason}</small>}
+              {run?.warning && <small className="warning-text">{run.warning}</small>}
+              {run?.error && <small>{run.error}</small>}
+            </div>;
           })}
         </section>
         <LayerPanel
@@ -320,8 +391,9 @@ export default function App() {
         <button className="command" onClick={useGps}>GPS ORIGIN</button>
         <button className="command" onClick={useScanOrigin}>SCAN ORIGIN</button>
         <button className={`command ${state.autoScan ? 'on' : ''}`} aria-pressed={state.autoScan} onClick={() => dispatch({ type: 'AUTO_SCAN_SET', value: !state.autoScan })}>AUTO SCAN</button>
-        <div className="scan-readout"><span>SCAN MODEL</span><strong>VISIBLE BOUNDS · z{state.viewport.zoom.toFixed(1)}</strong></div>
-        <div className="command-note">PUBLIC / OPEN DATA ONLY · © OPENSTREETMAP CONTRIBUTORS · FL511 / FDOT</div>
+        <button className="command" onClick={() => void clearCache()}>CLEAR CACHE</button>
+        <div className="scan-readout"><span>SCAN MODEL</span><strong>VISIBLE BOUNDS · SAFE TILES · z{state.viewport.zoom.toFixed(1)}</strong></div>
+        <div className="command-note">PUBLIC / OPEN DATA ONLY · © OPENSTREETMAP CONTRIBUTORS · FL511 / FDOT · CALTRANS</div>
       </footer>
 
       <nav className="mobile-toolbar" aria-label="Raven mobile panels">
