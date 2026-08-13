@@ -67,8 +67,8 @@ export default function App() {
   const scanControllerRef = useRef<AbortController | null>(null);
   const searchControllerRef = useRef<AbortController | null>(null);
 
-  const fetched = useMemo(() => allFeatures(state), [state.providers]);
-  const visible = useMemo(() => visibleFeatures(state), [state.providers, state.layers]);
+  const fetched = useMemo(() => allFeatures(state), [state]);
+  const visible = useMemo(() => visibleFeatures(state), [state]);
   const enriched = useMemo<EnrichedFeature[]>(() => visible.map(feature => ({
     ...feature,
     distance: distanceMeters(state.referenceOrigin.lat, state.referenceOrigin.lon, feature.lat, feature.lon),
