@@ -74,7 +74,7 @@ export function RavenMap({
       container: containerRef.current,
       center: [-80.1918, 25.7617],
       zoom: 13.4,
-      attributionControl: true,
+      attributionControl: { compact: true },
       style: {
         version: 8,
         sources: {
