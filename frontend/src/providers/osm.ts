@@ -4,6 +4,7 @@ import type { RavenProvider } from './types';
 const OVERPASS = 'https://overpass-api.de/api/interpreter';
 const MAX_TILE_SPAN = 0.75;
 const MAX_TILES = 24;
+const MIN_SAFE_ZOOM = 8;
 
 function cameraType(tags: Record<string, string>): RavenFeature['cameraType'] {
   if ((tags['surveillance:type'] || '').toLowerCase() === 'alpr') return 'alpr';
@@ -111,9 +112,11 @@ export const osmProvider: RavenProvider = {
   name: 'OpenStreetMap / Overpass',
   attribution: '© OpenStreetMap contributors',
   capabilities: ['mapped-camera', 'camera-type', 'direction', 'operator'],
-  minZoom: 8,
   cacheTtlMs: 5 * 60 * 1000,
   async scan(request, signal) {
+    if (request.zoom < MIN_SAFE_ZOOM) {
+      throw new Error(`ZOOM IN TO z${MIN_SAFE_ZOOM}+ BEFORE OSM SCAN`);
+    }
     const tiles = tileBounds(request.bounds);
     const deduped = new Map<string, RavenFeature>();
     let completed = 0;
