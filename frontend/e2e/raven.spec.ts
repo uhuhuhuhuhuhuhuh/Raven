@@ -2,6 +2,10 @@ import { expect, test } from '@playwright/test';
 
 const transparentPng = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64');
 
+function isMobile(page: Parameters<typeof test>[0] extends never ? never : any) {
+  return (page.viewportSize()?.width || 1000) <= 900;
+}
+
 test.beforeEach(async ({ page }) => {
   await page.route('**/api/health', route => route.fulfill({ status: 404, body: '{}' }));
   await page.route('https://tile.openstreetmap.org/**', route => route.fulfill({ status: 200, contentType: 'image/png', body: transparentPng }));
@@ -53,11 +57,15 @@ test('snapshot layers hide and restore without destructive data loss', async ({ 
   await page.goto('/');
   await expect(page.getByText('RAVEN', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'SCAN VIEW' }).click();
+
+  if (isMobile(page)) {
+    await page.getByRole('button', { name: 'CONTACTS', exact: true }).click();
+  }
   await expect(page.getByText('Snapshot Test Camera')).toBeVisible();
   await expect(page.getByText('Mapped Test Camera')).toBeVisible();
   expect(providerRequests).toBe(2);
 
-  if ((page.viewportSize()?.width || 1000) <= 900) {
+  if (isMobile(page)) {
     await page.getByRole('button', { name: 'LAYERS', exact: true }).click();
   }
 
@@ -66,21 +74,19 @@ test('snapshot layers hide and restore without destructive data loss', async ({ 
   await snapshotToggle.click();
   await expect(snapshotToggle).toHaveAttribute('aria-pressed', 'false');
 
-  if ((page.viewportSize()?.width || 1000) <= 900) {
-    await page.getByText('ANALYTICS / LAYERS').locator('..').getByRole('button').click();
+  if (isMobile(page)) {
     await page.getByRole('button', { name: 'CONTACTS', exact: true }).click();
   }
   await expect(page.getByText('Snapshot Test Camera')).toHaveCount(0);
   await expect(page.getByText('Mapped Test Camera')).toBeVisible();
 
-  if ((page.viewportSize()?.width || 1000) <= 900) {
+  if (isMobile(page)) {
     await page.getByRole('button', { name: 'LAYERS', exact: true }).click();
   }
   await page.getByRole('button', { name: /TRAFFIC SNAPSHOTS/ }).click();
   expect(providerRequests).toBe(2);
 
-  if ((page.viewportSize()?.width || 1000) <= 900) {
-    await page.getByText('ANALYTICS / LAYERS').locator('..').getByRole('button').click();
+  if (isMobile(page)) {
     await page.getByRole('button', { name: 'CONTACTS', exact: true }).click();
   }
   await expect(page.getByText('Snapshot Test Camera')).toBeVisible();
