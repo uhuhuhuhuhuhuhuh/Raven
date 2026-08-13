@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { caltransProvider } from './caltrans';
 import { fl511Provider } from './fl511';
 import { osmProvider, tileBounds } from './osm';
+import { providerPlan } from './registry';
 
 const floridaBounds = { west: -80.3, south: 25.7, east: -80.1, north: 25.9 };
 const californiaBounds = { west: -118.6, south: 33.8, east: -118.0, north: 34.2 };
@@ -18,6 +19,21 @@ describe('camera providers', () => {
 
     await osmProvider.scan({ mode: 'static', bounds: floridaBounds, zoom: 13 }, new AbortController().signal);
     expect(queryText).toContain('(25.7,-80.3,25.9,-80.1)');
+  });
+
+  it('rejects an unsafe low-zoom OSM scan before making a network request', async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+    await expect(osmProvider.scan({ mode: 'static', bounds: floridaBounds, zoom: 5 }, new AbortController().signal))
+      .rejects.toThrow('ZOOM IN TO z8+');
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('skips statewide providers below their safe zoom threshold', () => {
+    const floridaPlan = providerPlan(floridaBounds, 5);
+    const californiaPlan = providerPlan(californiaBounds, 5);
+    expect(floridaPlan.skipped['fl511-public-cameras']).toContain('z6+');
+    expect(californiaPlan.skipped['caltrans-cctv']).toContain('z6+');
   });
 
   it('splits broad OSM views into bounded progressive tiles', async () => {
