@@ -1,8 +1,8 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 
 const transparentPng = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64');
 
-function isMobile(page: Parameters<typeof test>[0] extends never ? never : any) {
+function isMobile(page: Page) {
   return (page.viewportSize()?.width || 1000) <= 900;
 }
 
