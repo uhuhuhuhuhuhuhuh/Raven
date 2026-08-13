@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { RavenFeature } from '../types';
 
 const REFRESH_OPTIONS = [0, 1000, 3000, 5000, 10000, 30000];
@@ -31,7 +31,7 @@ export function SnapshotViewer({ feature }: { feature: RavenFeature }) {
   const [status, setStatus] = useState<'loading' | 'active' | 'stale' | 'offline'>('loading');
   const generation = useRef(0);
 
-  const age = useMemo(() => sourceAge(feature.sourceUpdatedAt), [feature.sourceUpdatedAt, frameLoadedAt]);
+  const age = sourceAge(feature.sourceUpdatedAt);
 
   useEffect(() => {
     generation.current += 1;
