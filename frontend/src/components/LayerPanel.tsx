@@ -1,10 +1,12 @@
+import { CAMERA_COLORS } from '../colors';
 import type { LayerKey } from '../types';
 
-const LAYERS: Array<{ key: LayerKey; label: string; group: 'CAMERAS' | 'OVERLAYS'; hint: string }> = [
-  { key: 'mappedCameras', label: 'MAPPED CAMERAS', group: 'CAMERAS', hint: 'OSM surveillance records' },
-  { key: 'snapshots', label: 'TRAFFIC SNAPSHOTS', group: 'CAMERAS', hint: 'Refreshing public images' },
-  { key: 'streams', label: 'VIDEO STREAMS', group: 'CAMERAS', hint: 'Continuous public video' },
-  { key: 'speedCameras', label: 'SPEED CAMERAS', group: 'CAMERAS', hint: 'Mapped speed-camera records' },
+const LAYERS: Array<{ key: LayerKey; label: string; group: 'CAMERAS' | 'OVERLAYS'; hint: string; color?: string }> = [
+  { key: 'mappedCameras', label: 'MAPPED CAMERAS', group: 'CAMERAS', hint: 'OSM surveillance records', color: CAMERA_COLORS.mapped },
+  { key: 'snapshots', label: 'TRAFFIC SNAPSHOTS', group: 'CAMERAS', hint: 'Refreshing public images', color: CAMERA_COLORS.snapshot },
+  { key: 'streams', label: 'VIDEO STREAMS', group: 'CAMERAS', hint: 'Continuous public video', color: CAMERA_COLORS.stream },
+  { key: 'speedCameras', label: 'SPEED CAMERAS', group: 'CAMERAS', hint: 'Mapped speed-camera records', color: CAMERA_COLORS.speed },
+  { key: 'alpr', label: 'PLATE READERS (ALPR)', group: 'CAMERAS', hint: 'OSM surveillance:type=ALPR', color: CAMERA_COLORS.alpr },
   { key: 'heat', label: 'HEATMAP', group: 'OVERLAYS', hint: 'Visible-contact density' },
   { key: 'scanOutline', label: 'SCAN OUTLINE', group: 'OVERLAYS', hint: 'Last queried viewport' },
   { key: 'fov', label: 'FIELD OF VIEW', group: 'OVERLAYS', hint: 'Approx. facing where tagged · z15+' },
@@ -35,7 +37,7 @@ export function LayerPanel({
               aria-pressed={layers[layer.key]}
               onClick={() => onToggle(layer.key)}
             >
-              <span><strong>{layer.label}</strong><small>{layer.hint}</small></span>
+              <span><strong>{layer.color && <i className="layer-swatch" style={{ background: layer.color }} aria-hidden="true" />}{layer.label}</strong><small>{layer.hint}</small></span>
               <b>{layers[layer.key] ? 'ON' : 'OFF'}</b>
             </button>
           ))}

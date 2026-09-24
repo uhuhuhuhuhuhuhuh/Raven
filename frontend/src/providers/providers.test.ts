@@ -153,7 +153,8 @@ describe('camera providers', () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
       elements: [
         { type: 'node', id: 1, lat: 25.76, lon: -80.19, tags: { man_made: 'surveillance', 'camera:direction': 'SW', direction: '10' } },
-        { type: 'node', id: 2, lat: 25.77, lon: -80.18, tags: { man_made: 'surveillance', direction: '90' } }
+        { type: 'node', id: 2, lat: 25.77, lon: -80.18, tags: { man_made: 'surveillance', direction: '90' } },
+        { type: 'node', id: 3, lat: 25.78, lon: -80.17, tags: { man_made: 'surveillance', 'surveillance:type': 'ALPR', manufacturer: 'Flock Safety' } }
       ]
     }), { status: 200, headers: { 'Content-Type': 'application/json' } })));
 
@@ -162,6 +163,8 @@ describe('camera providers', () => {
     expect(byId.get('1')?.bearing).toBe(225);
     expect(byId.get('1')?.directionLabel).toBe('SW');
     expect(byId.get('2')?.bearing).toBe(90);
+    expect(byId.get('3')?.cameraType).toBe('alpr');
+    expect(byId.get('3')?.manufacturer).toBe('Flock Safety');
   });
 
   it('keeps already-fetched ArcGIS pages when a later page fails', async () => {

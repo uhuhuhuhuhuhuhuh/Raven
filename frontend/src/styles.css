@@ -133,6 +133,7 @@ button:disabled { opacity: .45; cursor: not-allowed !important; }
 .class-count { border:1px solid rgba(102,247,184,.12); padding:8px; display:flex; justify-content:space-between; align-items:center; }
 .class-count span { color:var(--muted); font-size:7px; }
 .class-count strong { color:#d9ffec; font-size:11px; }
+.layer-swatch { display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:6px; vertical-align:middle; }
 .provider-health .health-line { display:grid; grid-template-columns:1fr auto; font-size:8px; padding:9px 0; border-bottom:1px solid rgba(102,247,184,.08); gap:6px 10px; }
 .provider-health .health-line span { color:var(--muted); }
 .provider-health .health-line strong { color:#d9ffec; text-align:right; }

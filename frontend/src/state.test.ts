@@ -14,6 +14,10 @@ const speed: RavenFeature = {
   id: 'speed-1', providerId: 'osm-overpass', kind: 'camera', cameraType: 'speed', mediaType: 'none',
   name: 'Speed Camera', lat: 25.78, lon: -80.17, fetchedAt: new Date().toISOString(), metadata: {}
 };
+const alpr: RavenFeature = {
+  id: 'alpr-1', providerId: 'osm-overpass', kind: 'camera', cameraType: 'alpr', mediaType: 'none', manufacturer: 'Flock Safety',
+  name: 'Plate Reader', lat: 25.79, lon: -80.16, fetchedAt: new Date().toISOString(), metadata: {}
+};
 const streamWithSnapshot: RavenFeature = {
   id: 'stream-1', providerId: 'caltrans-cctv', kind: 'camera', cameraType: 'fixed', mediaType: 'stream',
   name: 'Stream Camera', lat: 34.05, lon: -118.25, snapshotUrl: 'https://example.test/fallback.jpg',
@@ -28,7 +32,7 @@ function loadedState() {
     allProviderIds: ['osm-overpass', 'fl511-public-cameras', 'caltrans-cctv'],
     skipReasons: { 'caltrans-cctv': 'OUTSIDE COVERAGE' }, timestamp: 1
   });
-  state = ravenReducer(state, { type: 'PROVIDER_SUCCESS', scanId: 'scan-a', providerId: 'osm-overpass', features: [mapped, speed], timestamp: 2 });
+  state = ravenReducer(state, { type: 'PROVIDER_SUCCESS', scanId: 'scan-a', providerId: 'osm-overpass', features: [mapped, speed, alpr], timestamp: 2 });
   state = ravenReducer(state, { type: 'PROVIDER_SUCCESS', scanId: 'scan-a', providerId: 'fl511-public-cameras', features: [snapshot], timestamp: 2 });
   state = ravenReducer(state, { type: 'SCAN_FINISH', scanId: 'scan-a', status: 'ready', timestamp: 3 });
   return state;
@@ -37,10 +41,10 @@ function loadedState() {
 describe('Raven state invariants', () => {
   it('hides snapshot layers without deleting fetched provider data', () => {
     let state = loadedState();
-    expect(allFeatures(state)).toHaveLength(3);
+    expect(allFeatures(state)).toHaveLength(4);
     expect(visibleFeatures(state).some(feature => feature.id === snapshot.id)).toBe(true);
     state = ravenReducer(state, { type: 'LAYER_SET', layer: 'snapshots', value: false });
-    expect(allFeatures(state)).toHaveLength(3);
+    expect(allFeatures(state)).toHaveLength(4);
     expect(visibleFeatures(state).some(feature => feature.id === snapshot.id)).toBe(false);
     state = ravenReducer(state, { type: 'LAYER_SET', layer: 'snapshots', value: true });
     expect(visibleFeatures(state).some(feature => feature.id === snapshot.id)).toBe(true);
@@ -107,5 +111,16 @@ describe('Raven state invariants', () => {
     expect(state.providers['osm-overpass'].status).toBe('loading');
     expect(state.providers['osm-overpass'].features).toEqual([mapped]);
     expect(state.providers['osm-overpass'].progress).toEqual({ completed: 1, total: 4 });
+  });
+
+  it('controls plate readers (ALPR) independently of other mapped cameras', () => {
+    let state = loadedState();
+    state = ravenReducer(state, { type: 'LAYER_SET', layer: 'alpr', value: false });
+    expect(visibleFeatures(state).some(feature => feature.id === alpr.id)).toBe(false);
+    expect(visibleFeatures(state).some(feature => feature.id === mapped.id)).toBe(true);
+    state = ravenReducer(state, { type: 'LAYER_SET', layer: 'alpr', value: true });
+    state = ravenReducer(state, { type: 'LAYER_SET', layer: 'mappedCameras', value: false });
+    expect(visibleFeatures(state).some(feature => feature.id === alpr.id)).toBe(true);
+    expect(visibleFeatures(state).some(feature => feature.id === mapped.id)).toBe(false);
   });
 });

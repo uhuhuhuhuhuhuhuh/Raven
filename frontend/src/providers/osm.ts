@@ -41,6 +41,7 @@ function normalizeElement(element: any): RavenFeature | null {
     bearing: parseViewingDirection(direction),
     directionLabel: direction,
     operator: tags.operator,
+    manufacturer: tags.manufacturer,
     zone: tags['surveillance:zone'],
     sourceUrl: `https://www.openstreetmap.org/${element.type}/${element.id}`,
     attribution: '© OpenStreetMap contributors',

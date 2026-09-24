@@ -37,6 +37,7 @@ export type RavenFeature = {
   bearing?: number;
   directionLabel?: string;
   operator?: string;
+  manufacturer?: string;
   zone?: string;
   sourceUrl?: string;
   snapshotUrl?: string;
@@ -70,7 +71,7 @@ export type ProviderRun = {
   skipReason?: string;
 };
 
-export type LayerKey = 'mappedCameras' | 'snapshots' | 'streams' | 'speedCameras' | 'heat' | 'scanOutline' | 'fov' | 'rings';
+export type LayerKey = 'mappedCameras' | 'snapshots' | 'streams' | 'speedCameras' | 'alpr' | 'heat' | 'scanOutline' | 'fov' | 'rings';
 
 export type RavenLogEntry = {
   id: string;

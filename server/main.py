@@ -192,6 +192,7 @@ def normalize(element: dict[str, Any]) -> dict[str, Any] | None:
         "bearing": parse_bearing(direction),
         "directionLabel": direction,
         "operator": tags.get("operator"),
+        "manufacturer": tags.get("manufacturer"),
         "zone": tags.get("surveillance:zone"),
         "sourceUrl": f"https://www.openstreetmap.org/{element_type}/{element_id}",
         "attribution": "© OpenStreetMap contributors",

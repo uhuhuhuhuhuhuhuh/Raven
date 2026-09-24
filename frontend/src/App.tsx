@@ -83,7 +83,9 @@ export default function App() {
     snapshot: visible.filter(hasSnapshot).length,
     stream: visible.filter(hasStream).length,
     mapped: visible.filter(feature => !hasSnapshot(feature) && !hasStream(feature)).length,
-    speed: visible.filter(feature => feature.cameraType === 'speed').length
+    speed: visible.filter(feature => feature.cameraType === 'speed').length,
+    alpr: visible.filter(feature => feature.cameraType === 'alpr').length,
+    facing: visible.filter(feature => feature.bearing !== undefined).length
   }), [visible]);
 
   const addLog = useCallback((channel: string, message: string, level: 'info' | 'warn' | 'error' = 'info') => {
@@ -389,6 +391,7 @@ export default function App() {
               <div><dt>COORD</dt><dd>{selected.lat.toFixed(6)}, {selected.lon.toFixed(6)}</dd></div>
               <div><dt>DIRECTION</dt><dd>{selected.directionLabel || (selected.bearing === undefined ? 'UNKNOWN' : `${selected.bearing}°`)}</dd></div>
               <div><dt>OPERATOR</dt><dd>{selected.operator || 'UNSPECIFIED'}</dd></div>
+              {selected.manufacturer && <div><dt>MANUFACTURER</dt><dd>{selected.manufacturer}</dd></div>}
               <div><dt>PROVIDER</dt><dd>{providerById(selected.providerId)?.name || selected.providerId}</dd></div>
               {selected.sourceUpdatedAt && <div><dt>SOURCE UPDATE</dt><dd>{selected.sourceUpdatedAt}</dd></div>}
             </dl>
@@ -408,6 +411,8 @@ export default function App() {
           <ClassCount label="SNAPSHOT" value={mediaCounts.snapshot} />
           <ClassCount label="STREAM" value={mediaCounts.stream} />
           <ClassCount label="SPEED" value={mediaCounts.speed} />
+          <ClassCount label="ALPR" value={mediaCounts.alpr} />
+          <ClassCount label="FACING" value={mediaCounts.facing} />
         </section>
         <MetricCard label="NEAREST" value={enriched[0] ? formatRange(enriched[0].distance) : '—'} sub={enriched[0] ? classLabel(enriched[0]) : 'NO VISIBLE CONTACT'} />
         <section className="analytics-card provider-health">

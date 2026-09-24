@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import maplibregl, { type GeoJSONSource, type Map as MapLibreMap } from 'maplibre-gl';
+import { CAMERA_COLORS } from '../colors';
 import { normalizeViewport } from '../geo';
 import { fovCollection, rangeRingCollection } from '../overlays';
 import type { MapView } from '../permalink';
@@ -216,11 +217,12 @@ export function RavenMap({
           'circle-radius': ['case', ['==', ['get', 'selected'], true], 8, 5.5],
           'circle-color': [
             'case',
-            ['==', ['get', 'selected'], true], '#62f2ff',
-            ['==', ['get', 'mediaType'], 'stream'], '#62f2ff',
-            ['==', ['get', 'mediaType'], 'snapshot'], '#65f0b5',
-            ['==', ['get', 'cameraType'], 'speed'], '#ff875f',
-            '#ffc857'
+            ['==', ['get', 'selected'], true], CAMERA_COLORS.stream,
+            ['==', ['get', 'mediaType'], 'stream'], CAMERA_COLORS.stream,
+            ['==', ['get', 'mediaType'], 'snapshot'], CAMERA_COLORS.snapshot,
+            ['==', ['get', 'cameraType'], 'alpr'], CAMERA_COLORS.alpr,
+            ['==', ['get', 'cameraType'], 'speed'], CAMERA_COLORS.speed,
+            CAMERA_COLORS.mapped
           ],
           'circle-stroke-color': '#07100d',
           'circle-stroke-width': 2,

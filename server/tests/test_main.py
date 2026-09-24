@@ -100,12 +100,15 @@ def test_scan_normalizes_osm_elements(client: TestClient, upstream: Upstream) ->
                 },
             },
             {"type": "node", "id": 2, "lat": 25.77, "lon": -80.18, "tags": {"highway": "speed_camera", "direction": "90°"}},
+            {"type": "node", "id": 4, "lat": 25.78, "lon": -80.17, "tags": {"man_made": "surveillance", "surveillance:type": "ALPR", "manufacturer": "Flock Safety"}},
             {"type": "way", "id": 3, "tags": {"man_made": "surveillance"}},  # no coordinates: dropped
         )
     )
     payload = client.get(f"/api/scan?{MIAMI}").json()
     features = {feature["sourceId"]: feature for feature in payload["features"]}
-    assert set(features) == {"1", "2"}
+    assert set(features) == {"1", "2", "4"}
+    assert features["4"]["cameraType"] == "alpr"
+    assert features["4"]["manufacturer"] == "Flock Safety"
     assert features["1"]["bearing"] == 225
     assert features["1"]["directionLabel"] == "SW"
     assert features["1"]["cameraType"] == "dome"
