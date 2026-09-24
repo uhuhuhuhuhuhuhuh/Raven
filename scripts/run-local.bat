@@ -17,6 +17,8 @@ call npm ci --no-audit --no-fund
 if errorlevel 1 exit /b 1
 call npm run build
 if errorlevel 1 exit /b 1
+call npm run build:api
+if errorlevel 1 exit /b 1
 popd
 
 echo [RAVEN] Local WebUI: http://127.0.0.1:8742

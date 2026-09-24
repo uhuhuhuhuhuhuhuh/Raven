@@ -3,6 +3,9 @@ name: Deploy Raven to GitHub Pages
 on:
   push:
     branches: [main]
+  schedule:
+    # Daily redeploy keeps the published camera/stream catalog (api/v1) current.
+    - cron: '23 7 * * *'
   workflow_dispatch:
 
 permissions:
@@ -41,6 +44,9 @@ jobs:
         env:
           VITE_BASE_PATH: /Raven/
         run: npm run build
+      - name: Build static camera/stream API
+        working-directory: frontend
+        run: npm run build:api
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

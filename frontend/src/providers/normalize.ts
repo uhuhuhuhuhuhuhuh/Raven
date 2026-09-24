@@ -6,6 +6,10 @@ export function publicHttpsUrl(value?: unknown): string | undefined {
   return undefined;
 }
 
+export function isHlsUrl(url: string): boolean {
+  return /\.m3u8(?:[?#].*)?$/i.test(url);
+}
+
 /** Numeric bearing in degrees ("45", "45°", 45), normalised into [0, 360). */
 export function parseBearing(value?: unknown): number | undefined {
   if (typeof value !== 'string' && typeof value !== 'number') return undefined;

@@ -202,3 +202,22 @@ def test_throttle_spaces_consecutive_calls() -> None:
 def test_retry_delay_honours_retry_after_with_bounds(header: str | None, attempt: int, expected: float) -> None:
     headers = {"Retry-After": header} if header is not None else {}
     assert main.retry_delay(httpx.Response(503, headers=headers), attempt) == expected
+
+
+def test_serves_the_static_camera_api_alongside_the_webui(tmp_path) -> None:
+    dist = tmp_path / "dist"
+    (dist / "api" / "v1").mkdir(parents=True)
+    (dist / "index.html").write_text("<!doctype html><title>Raven</title>")
+    (dist / "api" / "v1" / "streams.json").write_text(json.dumps({"version": 1, "count": 0, "streams": []}))
+    site = main.FastAPI()
+    main.mount_frontend(site, dist)
+    client = TestClient(site)
+    assert client.get("/api/v1/streams.json").json() == {"version": 1, "count": 0, "streams": []}
+    assert client.get("/api/v1/missing.json").status_code == 404
+    assert "Raven" in client.get("/").text
+
+
+def test_reports_when_the_webui_is_not_built(tmp_path) -> None:
+    site = main.FastAPI()
+    main.mount_frontend(site, tmp_path / "missing")
+    assert "not built" in TestClient(site).get("/").json()["message"]

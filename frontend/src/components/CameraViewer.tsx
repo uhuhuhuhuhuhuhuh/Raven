@@ -1,6 +1,7 @@
 import { useCallback, useState } from 'react';
 import type { RavenFeature } from '../types';
-import { isHlsUrl, LiveVideo, type LiveVideoStatus } from './LiveVideo';
+import { isHlsUrl } from '../providers/normalize';
+import { LiveVideo, type LiveVideoStatus } from './LiveVideo';
 import { SnapshotViewer } from './SnapshotViewer';
 
 const STREAM_STATUS: Record<LiveVideoStatus, { className: string; label: string }> = {

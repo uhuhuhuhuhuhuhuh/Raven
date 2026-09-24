@@ -229,6 +229,7 @@ def health() -> dict[str, Any]:
         "version": "1.1.0",
         "database": str(DB_PATH),
         "frontendBuilt": (FRONTEND_DIST / "index.html").exists(),
+        "staticApiBuilt": (FRONTEND_DIST / "api" / "v1" / "index.json").exists(),
     }
 
 
@@ -344,18 +345,29 @@ def stats() -> dict[str, Any]:
     return {"cacheEntries": cache_rows, "cameraCacheTtlSeconds": CACHE_TTL, "searchCacheTtlSeconds": SEARCH_CACHE_TTL}
 
 
-if FRONTEND_DIST.exists():
-    assets = FRONTEND_DIST / "assets"
-    if assets.exists():
-        app.mount("/assets", StaticFiles(directory=assets), name="assets")
+def mount_frontend(target: FastAPI, dist: Path) -> None:
+    """Serves the built WebUI and, once `npm run build:api` has run, the same static
+    camera/stream API that GitHub Pages publishes, under /api/v1."""
+    if not dist.exists():
+        @target.get("/")
+        def frontend_missing() -> dict[str, str]:
+            return {
+                "service": "raven",
+                "message": "Frontend is not built. Run npm ci && npm run build in frontend/ or use scripts/run-local.*",
+            }
 
-    @app.get("/")
+        return
+
+    assets = dist / "assets"
+    if assets.exists():
+        target.mount("/assets", StaticFiles(directory=assets), name="assets")
+    static_api = dist / "api" / "v1"
+    if static_api.exists():
+        target.mount("/api/v1", StaticFiles(directory=static_api), name="static-api")
+
+    @target.get("/")
     def frontend_root() -> FileResponse:
-        return FileResponse(FRONTEND_DIST / "index.html")
-else:
-    @app.get("/")
-    def frontend_missing() -> dict[str, str]:
-        return {
-            "service": "raven",
-            "message": "Frontend is not built. Run npm ci && npm run build in frontend/ or use scripts/run-local.*",
-        }
+        return FileResponse(dist / "index.html")
+
+
+mount_frontend(app, FRONTEND_DIST)

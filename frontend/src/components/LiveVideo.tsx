@@ -1,10 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
+import { isHlsUrl } from '../providers/normalize';
 
 export type LiveVideoStatus = 'connecting' | 'live' | 'error';
-
-export function isHlsUrl(url: string): boolean {
-  return /\.m3u8(?:[?#].*)?$/i.test(url);
-}
 
 /**
  * Plays a stream URL a provider publishes in its open data. HLS playlists use the
