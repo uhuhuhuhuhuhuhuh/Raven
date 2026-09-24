@@ -4,12 +4,25 @@ import { CameraViewer } from './components/CameraViewer';
 import { LayerPanel } from './components/LayerPanel';
 import { RavenMap, type MapFocus } from './components/RavenMap';
 import { VirtualContactList, type EnrichedFeature } from './components/VirtualContactList';
+import { matchesFilter } from './filter';
 import { bearingDegrees, distanceMeters, formatRange } from './geo';
 import { classLabel } from './labels';
 import { abortError } from './net';
+import { formatViewHash, parseViewHash } from './permalink';
+import { loadPreferences, savePreferences } from './preferences';
 import { providerById, providerPlan, ravenProviders } from './providers/registry';
 import { searchPlace } from './search';
-import { allFeatures, createInitialState, hasSnapshot, hasStream, logEntry, ravenReducer, visibleFeatures } from './state';
+import {
+  allFeatures,
+  createInitialState,
+  DEFAULT_VIEW,
+  hasSnapshot,
+  hasStream,
+  LAYER_KEYS,
+  logEntry,
+  ravenReducer,
+  visibleFeatures
+} from './state';
 import type { LayerKey, RavenFeature, RavenMode, RavenViewport } from './types';
 
 function scanId() {
@@ -35,9 +48,15 @@ async function detectMode(): Promise<RavenMode> {
 }
 
 export default function App() {
-  const [state, dispatch] = useReducer(ravenReducer, undefined, createInitialState);
+  // A shared #map=zoom/lat/lon link opens on that view; saved layer choices are restored.
+  const [initialView] = useState(() => parseViewHash(window.location.hash) ?? DEFAULT_VIEW);
+  const [state, dispatch] = useReducer(ravenReducer, undefined, () => {
+    const saved = loadPreferences(LAYER_KEYS);
+    return createInitialState(initialView, saved.layers, saved.autoScan);
+  });
   const [clock, setClock] = useState(new Date());
   const [query, setQuery] = useState('');
+  const [registerFilter, setRegisterFilter] = useState('');
   const [activity, setActivity] = useState('READY');
   const [focus, setFocus] = useState<MapFocus>(null);
   const [mobilePanel, setMobilePanel] = useState<'none' | 'contacts' | 'layers' | 'log'>('none');
@@ -52,6 +71,10 @@ export default function App() {
     azimuth: bearingDegrees(state.referenceOrigin.lat, state.referenceOrigin.lon, feature.lat, feature.lon)
   })).sort((a, b) => a.distance - b.distance), [visible, state.referenceOrigin]);
   const selected = enriched.find(feature => feature.id === state.selectionId) || null;
+  const registerFeatures = useMemo(
+    () => (registerFilter.trim() ? enriched.filter(feature => matchesFilter(feature, registerFilter)) : enriched),
+    [enriched, registerFilter]
+  );
 
   const mediaCounts = useMemo(() => ({
     snapshot: visible.filter(hasSnapshot).length,
@@ -76,6 +99,36 @@ export default function App() {
       searchControllerRef.current?.abort();
     };
   }, [addLog]);
+
+  useEffect(() => {
+    savePreferences({ layers: state.layers, autoScan: state.autoScan });
+  }, [state.layers, state.autoScan]);
+
+  // Keep the address bar pointing at the current view so it can be bookmarked or shared.
+  useEffect(() => {
+    const hash = formatViewHash({ ...state.viewport.center, zoom: state.viewport.zoom });
+    if (window.location.hash !== hash) window.history.replaceState(window.history.state, '', hash);
+  }, [state.viewport]);
+
+  useEffect(() => {
+    const onHashChange = () => {
+      const view = parseViewHash(window.location.hash);
+      if (view) setFocus({ ...view, token: Date.now() });
+    };
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
+  }, []);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || event.defaultPrevented) return;
+      if (event.target instanceof HTMLElement && event.target.closest('input, select, textarea')) return;
+      if (mobilePanel !== 'none') setMobilePanel('none');
+      else if (state.selectionId) dispatch({ type: 'SELECT', id: null });
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [mobilePanel, state.selectionId]);
 
   useEffect(() => {
     if (state.selectionId && !visible.some(feature => feature.id === state.selectionId)) {
@@ -285,21 +338,33 @@ export default function App() {
         <HudMetric label="VIEW" value={`z${state.viewport.zoom.toFixed(1)}`} sub={state.scan.status === 'dirty' ? 'STALE' : 'SYNC'} />
         <HudMetric label="VISIBLE" value={String(enriched.length).padStart(4, '0')} sub={`${fetched.length} FETCHED`} />
         <form className="search-box" onSubmit={submitSearch}><input aria-label="Search city, address, or coordinates" value={query} onChange={event => setQuery(event.target.value)} placeholder="SEARCH CITY / ADDRESS / LAT,LON" /><button type="submit">GO</button></form>
-        <div className="system-block"><span>SYSTEM</span><strong className={statusBad ? 'bad' : statusWarn ? 'warn' : ''}>● {statusLabel}</strong><small>MODE {state.mode.toUpperCase()}</small></div>
+        <div className="system-block"><span>SYSTEM</span><strong role="status" className={statusBad ? 'bad' : statusWarn ? 'warn' : ''}>● {statusLabel}</strong><small>MODE {state.mode.toUpperCase()}</small></div>
       </header>
 
       <aside className={`contact-register panel ${mobilePanel === 'contacts' ? 'mobile-open' : ''}`}>
-        <div className="panel-title"><span>CONTACT REGISTER</span><small>{enriched.length} VISIBLE</small><button className="mobile-close" onClick={() => setMobilePanel('none')}>×</button></div>
-        <VirtualContactList features={enriched} selectedId={state.selectionId} onSelect={id => dispatch({ type: 'SELECT', id })} />
+        <div className="panel-title"><span>CONTACT REGISTER</span><small>{registerFilter.trim() ? `${registerFeatures.length} / ${enriched.length}` : enriched.length} VISIBLE</small><button className="mobile-close" aria-label="Close contacts" onClick={() => setMobilePanel('none')}>×</button></div>
+        <input
+          className="register-filter"
+          type="search"
+          aria-label="Filter contact register"
+          placeholder="FILTER NAME / ROUTE / OPERATOR"
+          value={registerFilter}
+          onChange={event => setRegisterFilter(event.target.value)}
+        />
+        <VirtualContactList features={registerFeatures} selectedId={state.selectionId} onSelect={id => dispatch({ type: 'SELECT', id })} />
       </aside>
 
       <main className="map-stage">
         <RavenMap
+          initialView={initialView}
           features={visible}
           selectedId={state.selectionId}
           scanBounds={state.scan.bounds}
+          origin={state.referenceOrigin}
           heatEnabled={state.layers.heat}
           outlineEnabled={state.layers.scanOutline}
+          fovEnabled={state.layers.fov}
+          ringsEnabled={state.layers.rings}
           focus={focus}
           onViewportChange={handleViewport}
           onSelect={id => dispatch({ type: 'SELECT', id })}
@@ -310,7 +375,7 @@ export default function App() {
         {state.scan.status === 'dirty' && <div className="stale-banner">VIEWPORT CHANGED · RESULTS ARE FROM THE PREVIOUS SCAN <button onClick={() => void runScan('manual')}>RESCAN</button></div>}
         {selected && (
           <section className="detail-card panel">
-            <div className="panel-title"><span>CONTACT DETAIL</span><button onClick={() => dispatch({ type: 'SELECT', id: null })}>×</button></div>
+            <div className="panel-title"><span>CONTACT DETAIL</span><button aria-label="Close contact detail" onClick={() => dispatch({ type: 'SELECT', id: null })}>×</button></div>
             <strong className="detail-name">{selected.name || 'CAMERA'}</strong>
             <CameraViewer key={selected.id} feature={selected} />
             <dl>
@@ -331,7 +396,7 @@ export default function App() {
       </main>
 
       <aside className={`analytics-rail panel ${mobilePanel === 'layers' ? 'mobile-open' : ''}`}>
-        <div className="mobile-panel-head"><span>ANALYTICS / LAYERS</span><button onClick={() => setMobilePanel('none')}>×</button></div>
+        <div className="mobile-panel-head"><span>ANALYTICS / LAYERS</span><button aria-label="Close layers" onClick={() => setMobilePanel('none')}>×</button></div>
         <MetricCard label="VISIBLE CONTACTS" value={String(enriched.length)} sub={`${fetched.length} FETCHED`} />
         <section className="analytics-card classification-grid">
           <div className="section-label">MEDIA / CLASSIFICATION</div>
@@ -365,7 +430,7 @@ export default function App() {
       </aside>
 
       <section className={`system-log panel ${mobilePanel === 'log' ? 'mobile-open' : ''}`}>
-        <div className="panel-title"><span>SYSTEM LOG</span><small>{state.logs.length} EVENTS</small><button className="mobile-close" onClick={() => setMobilePanel('none')}>×</button></div>
+        <div className="panel-title"><span>SYSTEM LOG</span><small>{state.logs.length} EVENTS</small><button className="mobile-close" aria-label="Close system log" onClick={() => setMobilePanel('none')}>×</button></div>
         <div className="log-lines">{state.logs.map(entry => <div key={entry.id} className={`log-${entry.level}`}><span>{new Date(entry.timestamp).toISOString().slice(11, 19)}</span><b>{entry.channel.padEnd(8, ' ')}</b>{entry.message}</div>)}</div>
       </section>
 

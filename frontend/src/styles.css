@@ -18,6 +18,7 @@
 html, body, #root { width: 100%; height: 100%; margin: 0; overflow: hidden; }
 body { background: var(--bg); }
 button, input, select { font: inherit; }
+:is(button, a, select, summary):focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
 button { color: inherit; }
 button:disabled { opacity: .45; cursor: not-allowed !important; }
 
@@ -71,8 +72,10 @@ button:disabled { opacity: .45; cursor: not-allowed !important; }
 .panel-title button { border: 0; background: transparent; font-size: 20px; color: var(--muted); cursor: pointer; }
 .mobile-close { display: none; }
 
-.contact-register { grid-column: 1; grid-row: 2 / 3; z-index: 12; min-height: 0; overflow: hidden; }
-.contact-list { height: calc(100% - 38px); overflow: auto; scrollbar-width: thin; scrollbar-color: #315b4b transparent; position: relative; }
+.contact-register { grid-column: 1; grid-row: 2 / 3; z-index: 12; min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
+.contact-list { flex: 1; min-height: 0; overflow: auto; scrollbar-width: thin; scrollbar-color: #315b4b transparent; position: relative; }
+.register-filter { flex: 0 0 auto; margin: 8px 10px; background: rgba(0,0,0,.35); border: 1px solid var(--line); color: #e6fff2; padding: 8px 10px; font-size: 10px; letter-spacing: .08em; outline: none; }
+.register-filter:focus { border-color: var(--cyan); box-shadow: 0 0 0 1px rgba(98,242,255,.18); }
 .virtual-spacer { position: relative; width: 100%; }
 .contact-row { width: 100%; height: 62px; border: 0; border-bottom: 1px solid rgba(102,247,184,.09); background: transparent; display: grid; grid-template-columns: 44px 1fr auto; align-items: center; text-align: left; cursor: pointer; padding: 7px 10px; gap: 7px; }
 .virtual-row { position: absolute; left: 0; top: 0; }
@@ -209,7 +212,7 @@ button:disabled { opacity: .45; cursor: not-allowed !important; }
   .contact-register, .analytics-rail, .system-log { display:none; }
   .contact-register.mobile-open, .analytics-rail.mobile-open, .system-log.mobile-open { display:block; position:absolute; z-index:60; left:8px; right:8px; top:74px; bottom:62px; width:auto; height:auto; background:var(--panel-strong); border-color:rgba(98,242,255,.35); }
   .analytics-rail.mobile-open, .system-log.mobile-open { overflow:auto; }
-  .contact-register.mobile-open .contact-list { height:calc(100% - 38px); }
+  .contact-register.mobile-open { display:flex; }
   .system-log.mobile-open .log-lines { height:calc(100% - 38px); }
   .mobile-close { display:block !important; }
   .mobile-panel-head { height:38px; display:flex; align-items:center; justify-content:space-between; padding:0 12px; border-bottom:1px solid var(--line); color:var(--green); font-size:9px; letter-spacing:.1em; }
@@ -233,4 +236,8 @@ button:disabled { opacity: .45; cursor: not-allowed !important; }
   .system-block strong { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:90px; }
   .command-bar .command:nth-of-type(3) { display:none; }
   .detail-card dl div { grid-template-columns:100px 1fr; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scan-sweep::after { animation: none; }
 }

@@ -149,3 +149,74 @@ test('upgrades an existing v1 provider cache and prunes expired entries', async 
   expect(cache.keys).toContain('legacy:recent');
   expect(cache.keys).not.toContain('legacy:expired');
 });
+
+async function routeCameras(page: Page, elements: object[]) {
+  await page.route('https://overpass-api.de/api/interpreter', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ elements }) }));
+  await page.route('**/FL511_Traffic_Cameras/FeatureServer/0/query*', route => route.fulfill({ status: 200, contentType: 'application/json', body: '{"features":[],"exceededTransferLimit":false}' }));
+}
+
+async function openPanel(page: Page, name: 'CONTACTS' | 'LAYERS') {
+  if (isMobile(page)) await page.getByRole('button', { name, exact: true }).click();
+}
+
+test('opens a shared #map link and keeps the address bar in sync with the view', async ({ page }) => {
+  await page.goto('/#map=15.00/34.05000/-118.25000');
+  await expect(page.locator('.hud-metric', { hasText: 'REFERENCE ORIGIN' }).locator('strong')).toHaveText('34.0500, -118.2500');
+  await page.getByRole('button', { name: 'Zoom in' }).click();
+  await expect(page).toHaveURL(/#map=16\.00\/34\.050\d\d\/-118\.250\d\d$/);
+});
+
+test('filters the contact register and closes the detail card with Escape', async ({ page }) => {
+  await routeCameras(page, [
+    { type: 'node', id: 1, lat: 25.765, lon: -80.190, tags: { man_made: 'surveillance', name: 'Main St Camera' } },
+    { type: 'node', id: 2, lat: 25.766, lon: -80.191, tags: { man_made: 'surveillance', name: 'Harbor Gate Camera', operator: 'Port Authority' } }
+  ]);
+  await page.goto('/');
+  await page.getByRole('button', { name: 'SCAN VIEW' }).click();
+  await openPanel(page, 'CONTACTS');
+  await expect(page.getByText('Main St Camera')).toBeVisible();
+
+  await page.getByRole('searchbox', { name: 'Filter contact register' }).fill('port harbor');
+  await expect(page.getByText('Main St Camera')).toHaveCount(0);
+  await expect(page.locator('.contact-register .panel-title small')).toHaveText('1 / 2 VISIBLE');
+
+  await page.getByRole('button', { name: /Harbor Gate Camera/ }).click();
+  await expect(page.locator('.detail-card')).toBeVisible();
+  await page.keyboard.press('Escape');
+  if (isMobile(page)) await page.keyboard.press('Escape');
+  await expect(page.locator('.detail-card')).toHaveCount(0);
+});
+
+test('remembers layer choices across reloads', async ({ page }) => {
+  await page.goto('/');
+  await openPanel(page, 'LAYERS');
+  const heatmap = page.getByRole('button', { name: /HEATMAP/ });
+  await expect(heatmap).toHaveAttribute('aria-pressed', 'false');
+  await heatmap.click();
+  await expect(heatmap).toHaveAttribute('aria-pressed', 'true');
+
+  await page.reload();
+  await openPanel(page, 'LAYERS');
+  await expect(page.getByRole('button', { name: /HEATMAP/ })).toHaveAttribute('aria-pressed', 'true');
+});
+
+test('renders field-of-view wedges and range rings without map style errors', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', error => errors.push(error.message));
+  page.on('console', message => {
+    if (message.type() === 'error' && !message.text().startsWith('Failed to load resource')) errors.push(message.text());
+  });
+  await routeCameras(page, [
+    { type: 'node', id: 7, lat: 25.765, lon: -80.190, tags: { man_made: 'surveillance', name: 'Facing Camera', 'camera:direction': 'NE' } }
+  ]);
+  await page.goto('/#map=16.50/25.76500/-80.19000');
+  await page.getByRole('button', { name: 'SCAN VIEW' }).click();
+  await expect(page.getByText('● READY')).toBeVisible();
+
+  await openPanel(page, 'LAYERS');
+  await expect(page.getByRole('button', { name: /FIELD OF VIEW/ })).toHaveAttribute('aria-pressed', 'true');
+  await page.getByRole('button', { name: /RANGE RINGS/ }).click();
+  await expect(page.getByRole('button', { name: /RANGE RINGS/ })).toHaveAttribute('aria-pressed', 'true');
+  await page.waitForTimeout(500);
+  expect(errors).toEqual([]);
+});
