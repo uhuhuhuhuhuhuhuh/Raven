@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import math
 import os
 import sqlite3
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +25,25 @@ OVERPASS_URL = os.getenv("RAVEN_OVERPASS_URL", "https://overpass-api.de/api/inte
 NOMINATIM_URL = os.getenv("RAVEN_NOMINATIM_URL", "https://nominatim.openstreetmap.org/search")
 CACHE_TTL = int(os.getenv("RAVEN_CACHE_TTL", "300"))
 SEARCH_CACHE_TTL = int(os.getenv("RAVEN_SEARCH_CACHE_TTL", "86400"))
+# Largest bbox forwarded to the shared public Overpass service (~700 km x 700 km).
+# Comfortably above any tile the WebUI sends; stops world/continent-scale requests.
+MAX_BBOX_AREA_KM2 = float(os.getenv("RAVEN_MAX_BBOX_KM2", "500000"))
+# Nominatim's usage policy allows at most one request per second.
+NOMINATIM_MIN_INTERVAL = float(os.getenv("RAVEN_NOMINATIM_MIN_INTERVAL", "1.0"))
+UPSTREAM_RETRIES = 2
+RETRYABLE_STATUS = {429, 502, 503, 504}
 USER_AGENT = "Raven/1.1 (+https://github.com/uhuhuhuhuhuhuhuh/Raven)"
+# Tests swap in an httpx.MockTransport; None uses the real network.
+HTTP_TRANSPORT: httpx.AsyncBaseTransport | None = None
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS cache (
+    cache_key TEXT PRIMARY KEY,
+    payload TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS cache_created_at ON cache(created_at);
+"""
 
 app = FastAPI(title="Raven Local API", version="1.1.0")
 app.add_middleware(
@@ -34,20 +55,20 @@ app.add_middleware(
 )
 
 
-def db() -> sqlite3.Connection:
+@contextmanager
+def db() -> Iterator[sqlite3.Connection]:
+    """Opens the cache database for one unit of work: commits on success, always closes.
+
+    A bare ``with sqlite3.connect(...)`` only commits; it never closes the connection.
+    """
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(DB_PATH)
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS cache (
-            cache_key TEXT PRIMARY KEY,
-            payload TEXT NOT NULL,
-            created_at INTEGER NOT NULL
-        )
-        """
-    )
-    connection.commit()
-    return connection
+    try:
+        connection.executescript(SCHEMA)
+        with connection:
+            yield connection
+    finally:
+        connection.close()
 
 
 def read_cache(key: str, ttl: int) -> Any | None:
@@ -59,12 +80,55 @@ def read_cache(key: str, ttl: int) -> Any | None:
 
 
 def write_cache(key: str, payload: Any) -> None:
+    now = int(time.time())
     with db() as connection:
         connection.execute(
             "INSERT OR REPLACE INTO cache(cache_key, payload, created_at) VALUES (?, ?, ?)",
-            (key, json.dumps(payload), int(time.time())),
+            (key, json.dumps(payload), now),
         )
-        connection.commit()
+        # Rows older than the longest TTL can never be served again.
+        connection.execute("DELETE FROM cache WHERE created_at < ?", (now - max(CACHE_TTL, SEARCH_CACHE_TTL),))
+
+
+class Throttle:
+    """Serialises callers so consecutive calls start at least ``interval`` seconds apart."""
+
+    def __init__(self, interval: float) -> None:
+        self.interval = interval
+        self._lock = asyncio.Lock()
+        self._last = float("-inf")
+
+    async def wait(self) -> None:
+        async with self._lock:
+            delay = self._last + self.interval - time.monotonic()
+            if delay > 0:
+                await asyncio.sleep(delay)
+            self._last = time.monotonic()
+
+
+nominatim_throttle = Throttle(NOMINATIM_MIN_INTERVAL)
+
+
+def retry_delay(response: httpx.Response, attempt: int) -> float:
+    """Honours a numeric Retry-After, otherwise backs off exponentially; capped at 30 s."""
+    try:
+        delay = float(response.headers.get("Retry-After", ""))
+    except ValueError:
+        delay = math.nan
+    if not math.isfinite(delay) or delay < 0:
+        delay = 2.0 * 2**attempt
+    return min(delay, 30.0)
+
+
+async def request_with_retry(client: httpx.AsyncClient, method: str, url: str, **kwargs: Any) -> httpx.Response:
+    """Retries a bounded number of times when a shared public service is rate limiting or overloaded."""
+    attempt = 0
+    while True:
+        response = await client.request(method, url, **kwargs)
+        if response.status_code not in RETRYABLE_STATUS or attempt >= UPSTREAM_RETRIES:
+            return response
+        await asyncio.sleep(retry_delay(response, attempt))
+        attempt += 1
 
 
 def stable_key(prefix: str, *parts: Any) -> str:
@@ -72,13 +136,20 @@ def stable_key(prefix: str, *parts: Any) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
+COMPASS_POINTS = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"]
+
+
 def parse_bearing(raw: str | None) -> float | None:
+    """Degrees ("45", "45°") or a 16-point compass abbreviation ("SW"), normalised into [0, 360)."""
     if not raw:
         return None
+    text = raw.replace("°", "").strip()
     try:
-        return float(raw.replace("°", "").strip()) % 360
+        return float(text) % 360
     except ValueError:
-        return None
+        pass
+    upper = text.upper()
+    return COMPASS_POINTS.index(upper) * 22.5 if upper in COMPASS_POINTS else None
 
 
 def camera_type(tags: dict[str, str]) -> str:
@@ -104,6 +175,8 @@ def normalize(element: dict[str, Any]) -> dict[str, Any] | None:
     address = " ".join(part for part in address_parts if part) or None
     element_type = element.get("type", "node")
     element_id = element.get("id")
+    # `camera:direction` is the documented surveillance tag; plain `direction` is the common fallback.
+    direction = tags.get("camera:direction") or tags.get("direction")
     return {
         "id": f"osm-{element_type}-{element_id}",
         "providerId": "osm-overpass",
@@ -116,8 +189,8 @@ def normalize(element: dict[str, Any]) -> dict[str, Any] | None:
         "lat": element["lat"],
         "lon": element["lon"],
         "address": address,
-        "bearing": parse_bearing(tags.get("direction")),
-        "directionLabel": tags.get("direction"),
+        "bearing": parse_bearing(direction),
+        "directionLabel": direction,
         "operator": tags.get("operator"),
         "zone": tags.get("surveillance:zone"),
         "sourceUrl": f"https://www.openstreetmap.org/{element_type}/{element_id}",
@@ -134,9 +207,17 @@ def bounds_from_legacy(lat: float, lon: float, radius: int) -> tuple[float, floa
     return lon - lon_delta, lat - lat_delta, lon + lon_delta, lat + lat_delta
 
 
+def bbox_area_km2(west: float, south: float, east: float, north: float) -> float:
+    height_km = (north - south) * 111.32
+    width_km = (east - west) * 111.32 * math.cos(math.radians((north + south) / 2))
+    return abs(width_km * height_km)
+
+
 def validate_bounds(west: float, south: float, east: float, north: float) -> tuple[float, float, float, float]:
     if west >= east or south >= north:
         raise HTTPException(status_code=422, detail="Invalid viewport bounds")
+    if bbox_area_km2(west, south, east, north) > MAX_BBOX_AREA_KM2:
+        raise HTTPException(status_code=422, detail="Viewport too large for the public Overpass service; zoom in")
     return west, south, east, north
 
 
@@ -215,8 +296,8 @@ async def scan(
         f');out body;'
     )
     try:
-        async with httpx.AsyncClient(timeout=35.0, headers={"User-Agent": USER_AGENT}) as client:
-            response = await client.post(OVERPASS_URL, data={"data": query})
+        async with httpx.AsyncClient(timeout=35.0, headers={"User-Agent": USER_AGENT}, transport=HTTP_TRANSPORT) as client:
+            response = await request_with_retry(client, "POST", OVERPASS_URL, data={"data": query})
             response.raise_for_status()
             payload = response.json()
     except (httpx.HTTPError, ValueError) as exc:
@@ -237,7 +318,8 @@ async def search(q: str = Query(min_length=1, max_length=300)) -> dict[str, Any]
 
     params = {"q": normalized_query, "format": "jsonv2", "limit": "1"}
     try:
-        async with httpx.AsyncClient(timeout=15.0, headers={"User-Agent": USER_AGENT, "Accept-Language": "en"}) as client:
+        await nominatim_throttle.wait()
+        async with httpx.AsyncClient(timeout=15.0, headers={"User-Agent": USER_AGENT, "Accept-Language": "en"}, transport=HTTP_TRANSPORT) as client:
             response = await client.get(NOMINATIM_URL, params=params)
             response.raise_for_status()
             payload = response.json()
