@@ -1,7 +1,8 @@
 import { abortError, fetchWithRetry } from '../net';
 import type { RavenBounds, RavenFeature } from '../types';
 import { parseViewingDirection } from './normalize';
-import type { RavenProvider } from './types';
+import { boundsCovered, loadTileElements, loadTileIndex, type OsmTileIndex } from './osmTiles';
+import type { ProviderScanRequest, ProviderScanResult, RavenProvider } from './types';
 
 const OVERPASS = 'https://overpass-api.de/api/interpreter';
 const MAX_TILE_SPAN = 0.75;
@@ -105,6 +106,25 @@ async function scanTile(mode: 'static' | 'local', bounds: RavenBounds, signal: A
   return (payload.elements || []).map(normalizeElement).filter(Boolean) as RavenFeature[];
 }
 
+/** Reads published extract tiles instead of Overpass; the scan must lie inside their coverage. */
+async function scanExtractTiles(index: OsmTileIndex, apiBase: string, request: ProviderScanRequest, signal: AbortSignal): Promise<ProviderScanResult> {
+  const attribution = `© OpenStreetMap contributors · ${index.source}${index.dataTimestamp ? `, data as of ${index.dataTimestamp.slice(0, 10)}` : ''}`;
+  const deduped = new Map<string, RavenFeature>();
+  const { tiles, failed, firstError } = await loadTileElements(index, apiBase, request.bounds, signal, (elements, progress) => {
+    for (const element of elements) {
+      const feature = normalizeElement(element);
+      if (feature) deduped.set(feature.id, { ...feature, attribution });
+    }
+    request.onProgress?.(Array.from(deduped.values()), progress);
+  });
+  const reason = firstError instanceof Error ? firstError.message : 'tile request failed';
+  return {
+    features: Array.from(deduped.values()),
+    pages: tiles,
+    warning: failed ? `${failed}/${tiles} EXTRACT TILES FAILED · RESULTS INCOMPLETE · ${reason}` : undefined
+  };
+}
+
 export const osmProvider: RavenProvider = {
   id: 'osm-overpass',
   name: 'OpenStreetMap / Overpass',
@@ -114,6 +134,10 @@ export const osmProvider: RavenProvider = {
   async scan(request, signal) {
     if (request.zoom < MIN_SAFE_ZOOM) {
       throw new Error(`ZOOM IN TO z${MIN_SAFE_ZOOM}+ BEFORE OSM SCAN`);
+    }
+    const tileIndex = request.staticApiBase ? await loadTileIndex(request.staticApiBase) : null;
+    if (tileIndex && request.staticApiBase && boundsCovered(tileIndex.coverage, request.bounds)) {
+      return scanExtractTiles(tileIndex, request.staticApiBase, request, signal);
     }
     const tiles = tileBounds(request.bounds);
     const deduped = new Map<string, RavenFeature>();

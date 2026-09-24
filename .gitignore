@@ -8,3 +8,4 @@ server/data/
 frontend/test-results/
 frontend/playwright-report/
 .pytest_cache/
+frontend/public/api/

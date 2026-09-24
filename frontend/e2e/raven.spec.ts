@@ -8,6 +8,8 @@ function isMobile(page: Page) {
 
 test.beforeEach(async ({ page }) => {
   await page.route('**/api/health', route => route.fulfill({ status: 404, body: '{}' }));
+  // No extract tiles unless a test publishes some; keeps scans off the dev server's /api proxy.
+  await page.route('**/api/v1/osm/index.json', route => route.fulfill({ status: 404, body: '' }));
   await page.route('https://tile.openstreetmap.org/**', route => route.fulfill({ status: 200, contentType: 'image/png', body: transparentPng }));
   await page.route('https://fonts.openmaptiles.org/**', route => route.fulfill({ status: 200, contentType: 'application/x-protobuf', body: Buffer.alloc(0) }));
 });
@@ -259,4 +261,32 @@ test('plays a provider-published HLS stream in-app and falls back to the snapsho
   await detail.getByRole('button', { name: 'RETRY LIVE STREAM' }).click();
   await expect(detail.getByText('● STREAM UNAVAILABLE')).toBeVisible();
   expect(playlistRequests).toBeGreaterThan(before);
+});
+
+test('reads published Geofabrik extract tiles instead of querying Overpass', async ({ page }) => {
+  let overpassRequests = 0;
+  await page.route('https://overpass-api.de/api/interpreter', route => {
+    overpassRequests += 1;
+    return route.fulfill({ status: 200, contentType: 'application/json', body: '{"elements":[]}' });
+  });
+  await page.route('**/FL511_Traffic_Cameras/FeatureServer/0/query*', route => route.fulfill({ status: 200, contentType: 'application/json', body: '{"features":[]}' }));
+  await page.route('**/api/v1/osm/index.json', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      version: 1, source: 'Geofabrik north-america/us', license: 'ODbL', dataTimestamp: '2026-09-22T20:21:02Z', tileSize: 0.5, count: 1,
+      tiles: ['51_-161'], coverage: [{ hole: false, points: [[-125, 24], [-66, 24], [-66, 50], [-125, 50]] }]
+    })
+  }));
+  await page.route('**/api/v1/osm/tiles/51_-161.json', route => route.fulfill({
+    status: 200, contentType: 'application/json', body: JSON.stringify([[901, 25.765, -80.19, { man_made: 'surveillance', name: 'Extract Tile Camera' }]])
+  }));
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'SCAN VIEW' }).click();
+  await openPanel(page, 'CONTACTS');
+  await page.getByRole('button', { name: /Extract Tile Camera/ }).click();
+  if (isMobile(page)) await page.keyboard.press('Escape');
+  await expect(page.locator('.detail-source')).toHaveText('© OpenStreetMap contributors · Geofabrik north-america/us, data as of 2026-09-22');
+  expect(overpassRequests).toBe(0);
 });

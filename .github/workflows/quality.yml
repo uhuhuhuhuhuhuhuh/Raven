@@ -55,5 +55,5 @@ jobs:
         run: python -m py_compile server/main.py
       - name: Backend API tests
         run: python -m pytest -q
-      - name: Launcher syntax check
-        run: bash -n scripts/run-local.sh
+      - name: Shell script syntax check
+        run: for script in scripts/*.sh; do bash -n "$script"; done

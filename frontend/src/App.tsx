@@ -25,6 +25,9 @@ import {
 } from './state';
 import type { LayerKey, RavenFeature, RavenMode, RavenViewport } from './types';
 
+// Raven's static API (camera catalog, OSM extract tiles) sits beside the app on Pages and in Raven Local.
+const STATIC_API_BASE = new URL('api/v1/', document.baseURI).href;
+
 function scanId() {
   return globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
@@ -192,6 +195,7 @@ export default function App() {
           mode: state.mode,
           bounds: state.viewport.bounds,
           zoom: state.viewport.zoom,
+          staticApiBase: STATIC_API_BASE,
           onProgress: (features, progress) => {
             if (controller.signal.aborted || scanControllerRef.current !== controller) return;
             progressFeatures = features;
