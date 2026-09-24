@@ -119,15 +119,19 @@ Provider caching is an availability/performance optimization; failures to read o
 
 ## Map and UI
 
-- MapLibre map with native marker clustering
+- MapLibre map with native marker clustering on an [OpenFreeMap](https://openfreemap.org/) dark vector basemap, tinted to Raven's palette. OpenFreeMap is free, keyless and cookie-free, and built for app traffic, unlike the volunteer-run `tile.openstreetmap.org`. If it cannot be reached, the map falls back to OSM raster tiles; the system log records which basemap is in use.
 - separate unclustered heatmap source
 - exact last-scan outline
 - virtualized Contact Register
-- mapped/snapshot/stream/speed-camera layer controls
+- mapped/snapshot/stream/speed-camera layer controls, with a colour key
+- **Plate readers (ALPR)**: OSM `surveillance:type=ALPR` cameras get their own violet layer and counts, with the `manufacturer` shown when mapped
+- **Newly mapped**: rings around cameras added to OSM since the previous weekly extract, plus added/removed counts and an Atom feed link in the analytics rail. These show mapping activity, not installation dates.
 - **Field of view** wedges (from z15) for cameras whose source publishes a viewing direction. These are illustrative (60°, 45 m), and nothing is drawn for cameras without a direction.
 - **Range rings** (250 m – 5 km) around the reference origin
 - shareable view links: the address bar tracks `#map=zoom/lat/lon`, and opening one restores that view
 - Contact Register filter by name, route, operator, zone or class
+- **EXPORT GEOJSON** downloads the visible cameras, with every source's attribution
+- **EDIT ON OPENSTREETMAP** on OSM records, and **ADD CAMERA TO OSM**, which opens the OSM editor at the map centre
 - layer and auto-scan choices remembered in `localStorage`
 - provider health, progress, coverage and cache state
 - real timestamped system log
@@ -295,7 +299,11 @@ GitHub Pages cannot run a server, so Raven publishes its API as static JSON gene
 https://uhuhuhuhuhuhuhuh.github.io/Raven/api/v1/index.json     manifest + per-provider health
 https://uhuhuhuhuhuhuhuh.github.io/Raven/api/v1/cameras.json   every FL511 and Caltrans camera
 https://uhuhuhuhuhuhuhuh.github.io/Raven/api/v1/streams.json   cameras with a playable published live stream
-https://uhuhuhuhuhuhuhuh.github.io/Raven/api/v1/osm/index.json OpenStreetMap extract tile index (when built)
+https://uhuhuhuhuhuhuhuh.github.io/Raven/api/v1/cameras.geojson  the same catalogs as GeoJSON, for QGIS, uMap and similar tools
+https://uhuhuhuhuhuhuhuh.github.io/Raven/api/v1/streams.geojson
+https://uhuhuhuhuhuhuhuh.github.io/Raven/api/v1/osm/index.json   OpenStreetMap extract tile index (when built)
+https://uhuhuhuhuhuhuhuh.github.io/Raven/api/v1/osm/changes.json cameras added to / removed from OSM since last week
+https://uhuhuhuhuhuhuhuh.github.io/Raven/api/v1/osm/changes.atom Atom feed of newly mapped cameras
 ```
 
 A `streams.json` record:
@@ -310,12 +318,16 @@ A `streams.json` record:
   "direction": "North",
   "zone": "Alameda",
   "snapshotUrl": "https://cwwp2.dot.ca.gov/data/d4/cctv/image/tva22i680atsheridanrd/tva22i680atsheridanrd.jpg",
-  "stream": { "url": "https://wzmedia.dot.ca.gov/D4/N680_at_Sheridan_Rd.stream/playlist.m3u8", "format": "hls" },
+  "stream": { "url": "https://wzmedia.dot.ca.gov/D4/N680_at_Sheridan_Rd.stream/playlist.m3u8", "format": "hls", "online": true },
   "attribution": "Caltrans / State of California"
 }
 ```
 
 `scripts/build-api.ts` generates the files by running the same TypeScript providers the map uses over each provider's full coverage area, so the API and the app always agree. A provider that is down is recorded in `index.json` instead of failing the deploy. Build locally with `npm run build:api` (writes `dist/api/v1`).
+
+**Stream health.** About a third of the stream URLs Caltrans publishes do not answer at any given time. With `--check-streams`, which every Pages deploy uses, the build requests each playlist once:
+- `stream.online` records whether it returned a real HLS playlist (`streams.json` carries `healthCheckedAt`, and `index.json` a per-provider `streamsOnline`);
+- the check runs 24 at a time with a 5 s timeout and a 5 minute overall budget, and any stream not reached in time is left unmarked rather than reported offline.
 
 ## OpenStreetMap extract tiles (Geofabrik)
 
@@ -323,7 +335,10 @@ A `streams.json` record:
 
 1. `scripts/fetch-geofabrik-cameras.sh north-america/us <dir>` streams the ~11 GB extract through `osmium tags-filter`, so only surveillance and speed-camera nodes reach the disk. A truncated download fails the step.
 2. `scripts/build_osm_tiles.py` writes 0.5° JSON tiles plus `osm/index.json`, which records the coverage boundary, the extract's data date and the ODbL notice.
-3. If Geofabrik is unavailable, the deploy ships last week's tiles, or none, and the map uses Overpass.
+3. With `--previous` pointing at last week's tiles (restored from the Actions cache), it also writes `osm/changes.json` with the cameras added and removed since then. With `--site-url` it writes `osm/changes.atom`, one entry per newly mapped camera, linking to its spot on the map.
+4. If Geofabrik is unavailable, the deploy ships last week's tiles, or none, and the map uses Overpass.
+
+The first production build, on 2026-09-24, published 184,587 US camera nodes in 2,301 tiles.
 
 The browser uses the tiles only when the entire scan box lies inside the boundary. That means every corner is inside and no boundary edge crosses the box, so holes and coastline notches send the scan to Overpass instead. Records carry attribution such as `© OpenStreetMap contributors · Geofabrik north-america/us, data as of 2026-09-22`.
 
