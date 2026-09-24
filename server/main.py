@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import math
+import mimetypes
 import os
 import sqlite3
 import time
@@ -32,6 +33,8 @@ MAX_BBOX_AREA_KM2 = float(os.getenv("RAVEN_MAX_BBOX_KM2", "500000"))
 NOMINATIM_MIN_INTERVAL = float(os.getenv("RAVEN_NOMINATIM_MIN_INTERVAL", "1.0"))
 UPSTREAM_RETRIES = 2
 RETRYABLE_STATUS = {429, 502, 503, 504}
+# The static API publishes .geojson files; not every platform registers the type.
+mimetypes.add_type("application/geo+json", ".geojson")
 USER_AGENT = "Raven/1.1 (+https://github.com/uhuhuhuhuhuhuhuh/Raven)"
 # Tests swap in an httpx.MockTransport; None uses the real network.
 HTTP_TRANSPORT: httpx.AsyncBaseTransport | None = None
@@ -192,6 +195,7 @@ def normalize(element: dict[str, Any]) -> dict[str, Any] | None:
         "bearing": parse_bearing(direction),
         "directionLabel": direction,
         "operator": tags.get("operator"),
+        "manufacturer": tags.get("manufacturer"),
         "zone": tags.get("surveillance:zone"),
         "sourceUrl": f"https://www.openstreetmap.org/{element_type}/{element_id}",
         "attribution": "© OpenStreetMap contributors",

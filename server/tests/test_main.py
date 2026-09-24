@@ -100,12 +100,15 @@ def test_scan_normalizes_osm_elements(client: TestClient, upstream: Upstream) ->
                 },
             },
             {"type": "node", "id": 2, "lat": 25.77, "lon": -80.18, "tags": {"highway": "speed_camera", "direction": "90°"}},
+            {"type": "node", "id": 4, "lat": 25.78, "lon": -80.17, "tags": {"man_made": "surveillance", "surveillance:type": "ALPR", "manufacturer": "Flock Safety"}},
             {"type": "way", "id": 3, "tags": {"man_made": "surveillance"}},  # no coordinates: dropped
         )
     )
     payload = client.get(f"/api/scan?{MIAMI}").json()
     features = {feature["sourceId"]: feature for feature in payload["features"]}
-    assert set(features) == {"1", "2"}
+    assert set(features) == {"1", "2", "4"}
+    assert features["4"]["cameraType"] == "alpr"
+    assert features["4"]["manufacturer"] == "Flock Safety"
     assert features["1"]["bearing"] == 225
     assert features["1"]["directionLabel"] == "SW"
     assert features["1"]["cameraType"] == "dome"
@@ -209,10 +212,12 @@ def test_serves_the_static_camera_api_alongside_the_webui(tmp_path) -> None:
     (dist / "api" / "v1").mkdir(parents=True)
     (dist / "index.html").write_text("<!doctype html><title>Raven</title>")
     (dist / "api" / "v1" / "streams.json").write_text(json.dumps({"version": 1, "count": 0, "streams": []}))
+    (dist / "api" / "v1" / "streams.geojson").write_text(json.dumps({"type": "FeatureCollection", "features": []}))
     site = main.FastAPI()
     main.mount_frontend(site, dist)
     client = TestClient(site)
     assert client.get("/api/v1/streams.json").json() == {"version": 1, "count": 0, "streams": []}
+    assert client.get("/api/v1/streams.geojson").headers["content-type"].startswith("application/geo+json")
     assert client.get("/api/v1/missing.json").status_code == 404
     assert "Raven" in client.get("/").text
 

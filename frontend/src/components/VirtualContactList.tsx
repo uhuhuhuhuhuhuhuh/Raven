@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { formatRange } from '../geo';
-import { mediaClass, shortClassLabel } from '../labels';
+import { MARKER_BY_KEY, markerKey, markerTag } from '../markers';
 import type { RavenFeature } from '../types';
+import { MarkerSwatch } from './MarkerSwatch';
 
 export type EnrichedFeature = RavenFeature & { distance: number; azimuth: number };
 
-const ROW_HEIGHT = 62;
+const ROW_HEIGHT = 58;
 const OVERSCAN = 8;
 
 export function VirtualContactList({
@@ -40,7 +41,10 @@ export function VirtualContactList({
   return (
     <div ref={viewportRef} className="contact-list" onScroll={event => setScrollTop(event.currentTarget.scrollTop)}>
       {features.length === 0 ? (
-        <div className="empty-state">NO VISIBLE CONTACTS. SCAN THE CURRENT VIEWPORT OR ENABLE A CAMERA LAYER.</div>
+        <div className="empty-state">
+          <strong>No cameras in view</strong>
+          <span>Scan the current map view, or turn on a camera layer.</span>
+        </div>
       ) : (
         <div className="virtual-spacer" style={{ height: features.length * ROW_HEIGHT }}>
           {features.slice(range.start, range.end).map((feature, localIndex) => {
@@ -52,12 +56,12 @@ export function VirtualContactList({
                 style={{ transform: `translateY(${index * ROW_HEIGHT}px)` }}
                 onClick={() => onSelect(feature.id)}
               >
-                <span className="contact-index">{String(index + 1).padStart(4, '0')}</span>
+                <span className="contact-swatch"><MarkerSwatch marker={MARKER_BY_KEY[markerKey(feature)]} size={16} /></span>
                 <span className="contact-main">
-                  <strong>{feature.name || 'CAMERA'}</strong>
-                  <small>RNG {formatRange(feature.distance)} · AZ {Math.round(feature.azimuth)}°</small>
+                  <strong>{feature.name || 'Camera'}</strong>
+                  <small>{formatRange(feature.distance)} · {Math.round(feature.azimuth)}°</small>
                 </span>
-                <span className={`contact-tag media-${mediaClass(feature)}`}>{shortClassLabel(feature)}</span>
+                <span className="chip">{markerTag(feature)}</span>
               </button>
             );
           })}

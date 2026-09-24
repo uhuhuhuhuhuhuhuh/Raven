@@ -2,16 +2,28 @@ import { expect, test, type Page } from '@playwright/test';
 
 const transparentPng = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64');
 
+const basemapStyle = {
+  version: 8,
+  glyphs: 'https://tiles.openfreemap.org/fonts/{fontstack}/{range}.pbf',
+  sources: {},
+  layers: [{ id: 'background', type: 'background', paint: { 'background-color': '#0c0c0c' } }]
+};
+
 function isMobile(page: Page) {
-  return (page.viewportSize()?.width || 1000) <= 900;
+  // Matches the stylesheet's phone/tablet breakpoint, where panels become bottom sheets.
+  return (page.viewportSize()?.width || 1280) <= 1100;
 }
 
 test.beforeEach(async ({ page }) => {
   await page.route('**/api/health', route => route.fulfill({ status: 404, body: '{}' }));
   // No extract tiles unless a test publishes some; keeps scans off the dev server's /api proxy.
   await page.route('**/api/v1/osm/index.json', route => route.fulfill({ status: 404, body: '' }));
+  await page.route('**/api/v1/osm/changes.json', route => route.fulfill({ status: 404, body: '' }));
   await page.route('https://tile.openstreetmap.org/**', route => route.fulfill({ status: 200, contentType: 'image/png', body: transparentPng }));
   await page.route('https://fonts.openmaptiles.org/**', route => route.fulfill({ status: 200, contentType: 'application/x-protobuf', body: Buffer.alloc(0) }));
+  // A minimal stand-in for the OpenFreeMap style keeps the suite offline and deterministic.
+  await page.route('https://tiles.openfreemap.org/**', route => route.fulfill({ status: 200, contentType: 'application/x-protobuf', body: Buffer.alloc(0) }));
+  await page.route('https://tiles.openfreemap.org/styles/dark', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(basemapStyle) }));
 });
 
 test('snapshot layers hide and restore without destructive data loss', async ({ page }) => {
@@ -58,40 +70,30 @@ test('snapshot layers hide and restore without destructive data loss', async ({ 
   });
 
   await page.goto('/');
-  await expect(page.getByText('RAVEN', { exact: true })).toBeVisible();
-  await page.getByRole('button', { name: 'SCAN VIEW' }).click();
+  await expect(page.getByRole('banner')).toContainText('Raven');
+  await page.getByRole('button', { name: 'Scan view' }).click();
 
-  if (isMobile(page)) {
-    await page.getByRole('button', { name: 'CONTACTS', exact: true }).click();
-  }
+  await openPanel(page, 'Contacts');
   await expect(page.getByText('Snapshot Test Camera')).toBeVisible();
   await expect(page.getByText('Mapped Test Camera')).toBeVisible();
   expect(providerRequests).toBe(2);
 
-  if (isMobile(page)) {
-    await page.getByRole('button', { name: 'LAYERS', exact: true }).click();
-  }
+  await openPanel(page, 'Layers');
 
-  const snapshotToggle = page.getByRole('button', { name: /TRAFFIC SNAPSHOTS/ });
-  await expect(snapshotToggle).toHaveAttribute('aria-pressed', 'true');
+  const snapshotToggle = page.getByRole('switch', { name: /^Snapshot/ });
+  await expect(snapshotToggle).toHaveAttribute('aria-checked', 'true');
   await snapshotToggle.click();
-  await expect(snapshotToggle).toHaveAttribute('aria-pressed', 'false');
+  await expect(snapshotToggle).toHaveAttribute('aria-checked', 'false');
 
-  if (isMobile(page)) {
-    await page.getByRole('button', { name: 'CONTACTS', exact: true }).click();
-  }
+  await openPanel(page, 'Contacts');
   await expect(page.getByText('Snapshot Test Camera')).toHaveCount(0);
   await expect(page.getByText('Mapped Test Camera')).toBeVisible();
 
-  if (isMobile(page)) {
-    await page.getByRole('button', { name: 'LAYERS', exact: true }).click();
-  }
-  await page.getByRole('button', { name: /TRAFFIC SNAPSHOTS/ }).click();
+  await openPanel(page, 'Layers');
+  await page.getByRole('switch', { name: /^Snapshot/ }).click();
   expect(providerRequests).toBe(2);
 
-  if (isMobile(page)) {
-    await page.getByRole('button', { name: 'CONTACTS', exact: true }).click();
-  }
+  await openPanel(page, 'Contacts');
   await expect(page.getByText('Snapshot Test Camera')).toBeVisible();
 });
 
@@ -99,10 +101,10 @@ test('moving the map marks completed results stale', async ({ page }) => {
   await page.route('https://overpass-api.de/api/interpreter', route => route.fulfill({ status: 200, contentType: 'application/json', body: '{"elements":[]}' }));
   await page.route('**/FL511_Traffic_Cameras/FeatureServer/0/query*', route => route.fulfill({ status: 200, contentType: 'application/json', body: '{"features":[],"exceededTransferLimit":false}' }));
   await page.goto('/');
-  await page.getByRole('button', { name: 'SCAN VIEW' }).click();
-  await expect(page.getByText('● READY')).toBeVisible();
+  await page.getByRole('button', { name: 'Scan view' }).click();
+  await expect(page.getByRole('status')).toHaveText('Ready');
   await page.getByRole('button', { name: 'Zoom in' }).click();
-  await expect(page.getByText(/RESULTS ARE FROM THE PREVIOUS SCAN/)).toBeVisible();
+  await expect(page.getByText(/results are from the previous scan/)).toBeVisible();
 });
 
 test('upgrades an existing v1 provider cache and prunes expired entries', async ({ page }) => {
@@ -126,8 +128,8 @@ test('upgrades an existing v1 provider cache and prunes expired entries', async 
     };
   }));
 
-  await page.getByRole('button', { name: 'SCAN VIEW' }).click();
-  await expect(page.getByText('● READY')).toBeVisible();
+  await page.getByRole('button', { name: 'Scan view' }).click();
+  await expect(page.getByRole('status')).toHaveText('Ready');
 
   const readCache = () => page.evaluate(() => new Promise<{ version: number; indexes: string[]; keys: string[] }>((resolve, reject) => {
     const request = indexedDB.open('raven-provider-cache');
@@ -157,13 +159,15 @@ async function routeCameras(page: Page, elements: object[]) {
   await page.route('**/FL511_Traffic_Cameras/FeatureServer/0/query*', route => route.fulfill({ status: 200, contentType: 'application/json', body: '{"features":[],"exceededTransferLimit":false}' }));
 }
 
-async function openPanel(page: Page, name: 'CONTACTS' | 'LAYERS') {
+/** Shows a panel: a tab-bar button on phones and tablets, a side-panel tab on desktop (contacts are always shown there). */
+async function openPanel(page: Page, name: 'Contacts' | 'Overview' | 'Layers' | 'Sources' | 'Log') {
   if (isMobile(page)) await page.getByRole('button', { name, exact: true }).click();
+  else if (name !== 'Contacts') await page.getByRole('tab', { name }).click();
 }
 
 test('opens a shared #map link and keeps the address bar in sync with the view', async ({ page }) => {
   await page.goto('/#map=15.00/34.05000/-118.25000');
-  await expect(page.locator('.hud-metric', { hasText: 'REFERENCE ORIGIN' }).locator('strong')).toHaveText('34.0500, -118.2500');
+  await expect(page.locator('.telemetry-item', { hasText: 'Origin' }).locator('strong')).toHaveText('34.0500, -118.2500');
   await page.getByRole('button', { name: 'Zoom in' }).click();
   await expect(page).toHaveURL(/#map=16\.00\/34\.050\d\d\/-118\.250\d\d$/);
 });
@@ -174,13 +178,13 @@ test('filters the contact register and closes the detail card with Escape', asyn
     { type: 'node', id: 2, lat: 25.766, lon: -80.191, tags: { man_made: 'surveillance', name: 'Harbor Gate Camera', operator: 'Port Authority' } }
   ]);
   await page.goto('/');
-  await page.getByRole('button', { name: 'SCAN VIEW' }).click();
-  await openPanel(page, 'CONTACTS');
+  await page.getByRole('button', { name: 'Scan view' }).click();
+  await openPanel(page, 'Contacts');
   await expect(page.getByText('Main St Camera')).toBeVisible();
 
   await page.getByRole('searchbox', { name: 'Filter contact register' }).fill('port harbor');
   await expect(page.getByText('Main St Camera')).toHaveCount(0);
-  await expect(page.locator('.contact-register .panel-title small')).toHaveText('1 / 2 VISIBLE');
+  await expect(page.locator('.contacts-count')).toHaveText('1 / 2');
 
   await page.getByRole('button', { name: /Harbor Gate Camera/ }).click();
   await expect(page.locator('.detail-card')).toBeVisible();
@@ -191,15 +195,15 @@ test('filters the contact register and closes the detail card with Escape', asyn
 
 test('remembers layer choices across reloads', async ({ page }) => {
   await page.goto('/');
-  await openPanel(page, 'LAYERS');
-  const heatmap = page.getByRole('button', { name: /HEATMAP/ });
-  await expect(heatmap).toHaveAttribute('aria-pressed', 'false');
+  await openPanel(page, 'Layers');
+  const heatmap = page.getByRole('switch', { name: /^Heatmap/ });
+  await expect(heatmap).toHaveAttribute('aria-checked', 'false');
   await heatmap.click();
-  await expect(heatmap).toHaveAttribute('aria-pressed', 'true');
+  await expect(heatmap).toHaveAttribute('aria-checked', 'true');
 
   await page.reload();
-  await openPanel(page, 'LAYERS');
-  await expect(page.getByRole('button', { name: /HEATMAP/ })).toHaveAttribute('aria-pressed', 'true');
+  await openPanel(page, 'Layers');
+  await expect(page.getByRole('switch', { name: /^Heatmap/ })).toHaveAttribute('aria-checked', 'true');
 });
 
 test('renders field-of-view wedges and range rings without map style errors', async ({ page }) => {
@@ -212,13 +216,13 @@ test('renders field-of-view wedges and range rings without map style errors', as
     { type: 'node', id: 7, lat: 25.765, lon: -80.190, tags: { man_made: 'surveillance', name: 'Facing Camera', 'camera:direction': 'NE' } }
   ]);
   await page.goto('/#map=16.50/25.76500/-80.19000');
-  await page.getByRole('button', { name: 'SCAN VIEW' }).click();
-  await expect(page.getByText('● READY')).toBeVisible();
+  await page.getByRole('button', { name: 'Scan view' }).click();
+  await expect(page.getByRole('status')).toHaveText('Ready');
 
-  await openPanel(page, 'LAYERS');
-  await expect(page.getByRole('button', { name: /FIELD OF VIEW/ })).toHaveAttribute('aria-pressed', 'true');
-  await page.getByRole('button', { name: /RANGE RINGS/ }).click();
-  await expect(page.getByRole('button', { name: /RANGE RINGS/ })).toHaveAttribute('aria-pressed', 'true');
+  await openPanel(page, 'Layers');
+  await expect(page.getByRole('switch', { name: /^Field of view/ })).toHaveAttribute('aria-checked', 'true');
+  await page.getByRole('switch', { name: /^Range rings/ }).click();
+  await expect(page.getByRole('switch', { name: /^Range rings/ })).toHaveAttribute('aria-checked', 'true');
   await page.waitForTimeout(500);
   expect(errors).toEqual([]);
 });
@@ -246,20 +250,20 @@ test('plays a provider-published HLS stream in-app and falls back to the snapsho
   });
 
   await page.goto('/#map=14.00/34.05000/-118.25000');
-  await page.getByRole('button', { name: 'SCAN VIEW' }).click();
-  await openPanel(page, 'CONTACTS');
+  await page.getByRole('button', { name: 'Scan view' }).click();
+  await openPanel(page, 'Contacts');
   await page.getByRole('button', { name: /US-101 Live Test/ }).click();
   if (isMobile(page)) await page.keyboard.press('Escape');
 
   const detail = page.locator('.detail-card');
-  await expect(detail.getByText('PUBLIC HLS STREAM')).toBeVisible();
-  await expect(detail.getByText('● STREAM UNAVAILABLE')).toBeVisible();
+  await expect(detail.getByText('Public HLS stream')).toBeVisible();
+  await expect(detail.getByText('Stream unavailable')).toBeVisible();
   expect(playlistRequests).toBeGreaterThan(0);
   await expect(detail.getByRole('img', { name: /Public traffic camera snapshot/ })).toBeVisible();
 
   const before = playlistRequests;
-  await detail.getByRole('button', { name: 'RETRY LIVE STREAM' }).click();
-  await expect(detail.getByText('● STREAM UNAVAILABLE')).toBeVisible();
+  await detail.getByRole('button', { name: 'Retry live stream' }).click();
+  await expect(detail.getByText('Stream unavailable')).toBeVisible();
   expect(playlistRequests).toBeGreaterThan(before);
 });
 
@@ -283,10 +287,70 @@ test('reads published Geofabrik extract tiles instead of querying Overpass', asy
   }));
 
   await page.goto('/');
-  await page.getByRole('button', { name: 'SCAN VIEW' }).click();
-  await openPanel(page, 'CONTACTS');
+  await page.getByRole('button', { name: 'Scan view' }).click();
+  await openPanel(page, 'Contacts');
   await page.getByRole('button', { name: /Extract Tile Camera/ }).click();
   if (isMobile(page)) await page.keyboard.press('Escape');
   await expect(page.locator('.detail-source')).toHaveText('© OpenStreetMap contributors · Geofabrik north-america/us, data as of 2026-09-22');
   expect(overpassRequests).toBe(0);
+});
+
+test('shows cameras newly mapped since the last weekly extract', async ({ page }) => {
+  await page.route('**/api/v1/osm/changes.json', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      version: 1, baseline: false, since: '2026-09-15T20:00:00Z', until: '2026-09-22T20:21:02Z', addedCount: 2, removedCount: 1,
+      added: [[5, 25.765, -80.19, { man_made: 'surveillance' }], [6, 25.766, -80.191, { man_made: 'surveillance', 'surveillance:type': 'ALPR' }]],
+      removed: [[9, 25.7, -80.2, {}]], feed: 'changes.atom'
+    })
+  }));
+  await page.goto('/');
+  await openPanel(page, 'Overview');
+  const card = page.locator('.stat-card', { hasText: 'Newly mapped' });
+  await expect(card.locator('strong')).toHaveText('+2');
+  await expect(card).toContainText('1 removed · 2026-09-15 → 2026-09-22');
+  await expect(card.getByRole('link', { name: 'Atom feed' })).toHaveAttribute('href', /\/api\/v1\/osm\/changes\.atom$/);
+  await openPanel(page, 'Layers');
+  await expect(page.getByRole('switch', { name: /^Newly mapped/ })).toHaveAttribute('aria-checked', 'true');
+});
+
+test('exports the visible cameras as GeoJSON and links OSM records to the editor', async ({ page }) => {
+  await routeCameras(page, [
+    { type: 'node', id: 77, lat: 25.765, lon: -80.190, tags: { man_made: 'surveillance', 'surveillance:type': 'ALPR', name: 'Export Plate Reader' } }
+  ]);
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Scan view' }).click();
+  await expect(page.getByRole('status')).toHaveText('Ready');
+
+  const [download] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: 'Export GeoJSON' }).click()]);
+  expect(download.suggestedFilename()).toMatch(/^raven-cameras-\d{4}-\d{2}-\d{2}\.geojson$/);
+  const collection = JSON.parse(await (await download.createReadStream()).toArray().then(chunks => Buffer.concat(chunks).toString('utf8')));
+  expect(collection.type).toBe('FeatureCollection');
+  expect(collection.attribution).toContain('© OpenStreetMap contributors');
+  expect(collection.features).toEqual([expect.objectContaining({ id: 'osm-node-77', geometry: { type: 'Point', coordinates: [-80.19, 25.765] } })]);
+
+  await expect(page.getByRole('link', { name: 'Add camera to OSM' })).toHaveAttribute('href', /openstreetmap\.org\/edit#map=19\//);
+  await openPanel(page, 'Contacts');
+  await page.getByRole('button', { name: /Export Plate Reader/ }).click();
+  if (isMobile(page)) await page.keyboard.press('Escape');
+  await expect(page.getByRole('link', { name: 'Edit on OpenStreetMap' })).toHaveAttribute('href', 'https://www.openstreetmap.org/edit?node=77');
+});
+
+test('keeps the app chrome within the screen so the map never resizes under a finished scan', async ({ page }) => {
+  await routeCameras(page, [{ type: 'node', id: 1, lat: 25.765, lon: -80.19, tags: { man_made: 'surveillance' } }]);
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Scan view' }).click();
+  await expect(page.getByRole('status')).toHaveText('Ready');
+  // Chrome wider than a phone screen makes mobile browsers zoom the page out, which resizes
+  // the map and marks fresh results stale.
+  const overflow = await page.evaluate(() => [...document.querySelectorAll('.topbar, .topbar *, .dock, .dock *, .mobile-tabs *')]
+    .filter(element => element.getClientRects().length > 0)
+    .map(element => ({ element: String(element.className || element.tagName), box: element.getBoundingClientRect() }))
+    .filter(({ box }) => box.left < -0.5 || box.right > window.innerWidth + 0.5)
+    .map(({ element, box }) => `${element} ${Math.round(box.left)}..${Math.round(box.right)}`));
+  expect(overflow).toEqual([]);
+  expect(await page.evaluate(() => (document.querySelector('.maplibregl-canvas') as HTMLElement).clientWidth)).toBe(await page.evaluate(() => window.innerWidth));
+  await page.waitForTimeout(500);
+  await expect(page.getByRole('status')).toHaveText('Ready');
 });

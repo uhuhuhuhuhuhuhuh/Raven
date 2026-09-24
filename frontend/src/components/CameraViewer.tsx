@@ -5,9 +5,9 @@ import { LiveVideo, type LiveVideoStatus } from './LiveVideo';
 import { SnapshotViewer } from './SnapshotViewer';
 
 const STREAM_STATUS: Record<LiveVideoStatus, { className: string; label: string }> = {
-  connecting: { className: 'media-loading', label: 'CONNECTING' },
-  live: { className: 'media-active', label: 'LIVE' },
-  error: { className: 'media-offline', label: 'STREAM UNAVAILABLE' }
+  connecting: { className: 'media-loading', label: 'Connecting' },
+  live: { className: 'media-active', label: 'Live' },
+  error: { className: 'media-offline', label: 'Stream unavailable' }
 };
 
 export function CameraViewer({ feature }: { feature: RavenFeature }) {
@@ -20,14 +20,14 @@ export function CameraViewer({ feature }: { feature: RavenFeature }) {
     return (
       <section className="stream-viewer">
         <div className={`media-status ${status.className}`}>
-          <span>● {status.label}</span>
-          <span>{isHlsUrl(feature.streamUrl) ? 'PUBLIC HLS STREAM' : 'PUBLIC DIRECT MEDIA'}</span>
-          {failed && stream.detail && <span>{stream.detail}</span>}
+          <span className="media-state"><i className="status-dot" aria-hidden="true" />{status.label}</span>
+          <span className="chip">{isHlsUrl(feature.streamUrl) ? 'Public HLS stream' : 'Public direct media'}</span>
+          {failed && stream.detail && <span className="media-detail">{stream.detail}</span>}
         </div>
         {failed ? (
           <>
-            {feature.snapshotUrl ? <SnapshotViewer feature={feature} /> : <div className="media-empty">LIVE STREAM COULD NOT BE PLAYED</div>}
-            <button className="stream-link" onClick={() => setStream({ status: 'connecting' })}>RETRY LIVE STREAM</button>
+            {feature.snapshotUrl ? <SnapshotViewer feature={feature} /> : <div className="media-empty">The live stream could not be played</div>}
+            <button className="stream-link" onClick={() => setStream({ status: 'connecting' })}>Retry live stream</button>
           </>
         ) : (
           <LiveVideo
@@ -38,7 +38,7 @@ export function CameraViewer({ feature }: { feature: RavenFeature }) {
           />
         )}
         <div className="media-note">Live video published by {feature.operator || feature.providerId}. Playback depends on browser codec support.</div>
-        {!failed && feature.snapshotUrl && <details className="media-fallback"><summary>SHOW SNAPSHOT FALLBACK</summary><SnapshotViewer feature={feature} /></details>}
+        {!failed && feature.snapshotUrl && <details className="media-fallback"><summary>Show snapshot fallback</summary><SnapshotViewer feature={feature} /></details>}
       </section>
     );
   }
@@ -46,9 +46,9 @@ export function CameraViewer({ feature }: { feature: RavenFeature }) {
   if (feature.streamPageUrl) {
     return (
       <section className="stream-viewer external-stream">
-        <div className="media-status media-active"><span>● LIVE STREAM AVAILABLE</span><span>OFFICIAL VIEWER</span></div>
-        {feature.snapshotUrl ? <SnapshotViewer feature={feature} /> : <div className="media-empty">THIS CAMERA'S LIVE VIDEO IS PUBLISHED THROUGH THE OFFICIAL VIEWER.</div>}
-        <a className="stream-link" href={feature.streamPageUrl} target="_blank" rel="noreferrer">OPEN OFFICIAL LIVE STREAM ↗</a>
+        <div className="media-status media-active"><span className="media-state"><i className="status-dot" aria-hidden="true" />Live stream available</span><span className="chip">Official viewer</span></div>
+        {feature.snapshotUrl ? <SnapshotViewer feature={feature} /> : <div className="media-empty">This camera's live video is published through the official viewer.</div>}
+        <a className="stream-link" href={feature.streamPageUrl} target="_blank" rel="noreferrer">Open official live stream ↗</a>
       </section>
     );
   }
@@ -57,7 +57,7 @@ export function CameraViewer({ feature }: { feature: RavenFeature }) {
 
   return (
     <div className="media-empty">
-      {feature.mediaType === 'external' ? 'PUBLIC CAMERA PAGE AVAILABLE · NO EMBEDDABLE MEDIA' : 'NO PUBLIC MEDIA FOR THIS MAPPED CAMERA'}
+      {feature.mediaType === 'external' ? 'Public camera page available · no embeddable media' : 'No public media for this mapped camera'}
     </div>
   );
 }

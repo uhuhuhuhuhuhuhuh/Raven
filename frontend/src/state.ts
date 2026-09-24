@@ -54,10 +54,12 @@ export const DEFAULT_LAYERS: Record<LayerKey, boolean> = {
   snapshots: true,
   streams: true,
   speedCameras: true,
+  alpr: true,
   heat: false,
   scanOutline: true,
   fov: true,
-  rings: false
+  rings: false,
+  recent: true
 };
 
 export const LAYER_KEYS = Object.keys(DEFAULT_LAYERS) as LayerKey[];
@@ -236,6 +238,7 @@ export function allFeatures(state: RavenState): RavenFeature[] {
 export function visibleFeatures(state: RavenState): RavenFeature[] {
   return allFeatures(state).filter(feature => {
     if (feature.cameraType === 'speed') return state.layers.speedCameras;
+    if (feature.cameraType === 'alpr') return state.layers.alpr;
     const snapshot = hasSnapshot(feature);
     const stream = hasStream(feature);
     if (stream && state.layers.streams) return true;

@@ -1,15 +1,33 @@
+import type { ReactNode } from 'react';
+import { MARKER_CLASSES } from '../markers';
 import type { LayerKey } from '../types';
+import { MarkerSwatch } from './MarkerSwatch';
 
-const LAYERS: Array<{ key: LayerKey; label: string; group: 'CAMERAS' | 'OVERLAYS'; hint: string }> = [
-  { key: 'mappedCameras', label: 'MAPPED CAMERAS', group: 'CAMERAS', hint: 'OSM surveillance records' },
-  { key: 'snapshots', label: 'TRAFFIC SNAPSHOTS', group: 'CAMERAS', hint: 'Refreshing public images' },
-  { key: 'streams', label: 'VIDEO STREAMS', group: 'CAMERAS', hint: 'Continuous public video' },
-  { key: 'speedCameras', label: 'SPEED CAMERAS', group: 'CAMERAS', hint: 'Mapped speed-camera records' },
-  { key: 'heat', label: 'HEATMAP', group: 'OVERLAYS', hint: 'Visible-contact density' },
-  { key: 'scanOutline', label: 'SCAN OUTLINE', group: 'OVERLAYS', hint: 'Last queried viewport' },
-  { key: 'fov', label: 'FIELD OF VIEW', group: 'OVERLAYS', hint: 'Approx. facing where tagged · z15+' },
-  { key: 'rings', label: 'RANGE RINGS', group: 'OVERLAYS', hint: 'Distance from reference origin' }
+const CAMERA_HINTS: Partial<Record<LayerKey, string>> = {
+  streams: 'Continuous public video',
+  snapshots: 'Refreshing public images',
+  alpr: 'OSM surveillance:type=ALPR',
+  speedCameras: 'Mapped speed-camera records',
+  mappedCameras: 'OSM surveillance records'
+};
+
+const OVERLAYS: Array<{ key: LayerKey; label: string; hint: string }> = [
+  { key: 'fov', label: 'Field of view', hint: 'Approx. facing where tagged · z15+' },
+  { key: 'recent', label: 'Newly mapped', hint: 'Added to OSM since the last weekly extract' },
+  { key: 'heat', label: 'Heatmap', hint: 'Visible-contact density' },
+  { key: 'rings', label: 'Range rings', hint: 'Distance from reference origin' },
+  { key: 'scanOutline', label: 'Scan outline', hint: 'Last queried viewport' }
 ];
+
+function Switch({ label, hint, checked, onChange, swatch }: { label: string; hint: string; checked: boolean; onChange: () => void; swatch?: ReactNode }) {
+  return (
+    <button type="button" role="switch" aria-checked={checked} className="switch-row" onClick={onChange}>
+      {swatch && <span className="switch-swatch">{swatch}</span>}
+      <span className="switch-text"><strong>{label}</strong><small>{hint}</small></span>
+      <span className="switch-track" aria-hidden="true"><span className="switch-thumb" /></span>
+    </button>
+  );
+}
 
 export function LayerPanel({
   layers,
@@ -23,31 +41,30 @@ export function LayerPanel({
   onAutoScan: (value: boolean) => void;
 }) {
   return (
-    <section className="layer-panel analytics-card">
-      <div className="section-label">LAYER CONTROL</div>
-      {(['CAMERAS', 'OVERLAYS'] as const).map(group => (
-        <div key={group} className="layer-group">
-          <div className="layer-group-title">{group}</div>
-          {LAYERS.filter(layer => layer.group === group).map(layer => (
-            <button
-              key={layer.key}
-              className={`layer-toggle ${layers[layer.key] ? 'on' : ''}`}
-              aria-pressed={layers[layer.key]}
-              onClick={() => onToggle(layer.key)}
-            >
-              <span><strong>{layer.label}</strong><small>{layer.hint}</small></span>
-              <b>{layers[layer.key] ? 'ON' : 'OFF'}</b>
-            </button>
-          ))}
-        </div>
-      ))}
-      <div className="layer-group">
-        <div className="layer-group-title">SCANNING</div>
-        <button className={`layer-toggle ${autoScan ? 'on' : ''}`} aria-pressed={autoScan} onClick={() => onAutoScan(!autoScan)}>
-          <span><strong>AUTO SCAN</strong><small>Debounced after map movement</small></span>
-          <b>{autoScan ? 'ON' : 'OFF'}</b>
-        </button>
-      </div>
-    </section>
+    <div className="layer-panel">
+      <section className="card">
+        <h3 className="eyebrow">Cameras</h3>
+        {MARKER_CLASSES.map(marker => (
+          <Switch
+            key={marker.layer}
+            label={marker.label}
+            hint={CAMERA_HINTS[marker.layer] || ''}
+            checked={layers[marker.layer]}
+            onChange={() => onToggle(marker.layer)}
+            swatch={<MarkerSwatch marker={marker} />}
+          />
+        ))}
+      </section>
+      <section className="card">
+        <h3 className="eyebrow">Overlays</h3>
+        {OVERLAYS.map(layer => (
+          <Switch key={layer.key} label={layer.label} hint={layer.hint} checked={layers[layer.key]} onChange={() => onToggle(layer.key)} />
+        ))}
+      </section>
+      <section className="card">
+        <h3 className="eyebrow">Scanning</h3>
+        <Switch label="Auto scan" hint="Rescan shortly after the map stops moving" checked={autoScan} onChange={() => onAutoScan(!autoScan)} />
+      </section>
+    </div>
   );
 }

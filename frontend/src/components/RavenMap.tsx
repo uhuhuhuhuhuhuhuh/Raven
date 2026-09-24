@@ -1,12 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import maplibregl, { type GeoJSONSource, type Map as MapLibreMap } from 'maplibre-gl';
+import { loadBasemap, type Basemap } from '../basemap';
 import { normalizeViewport } from '../geo';
+import { MARKER_CLASSES, markerBitmap, markerKey } from '../markers';
 import { fovCollection, rangeRingCollection } from '../overlays';
 import type { MapView } from '../permalink';
 import type { RavenBounds, RavenFeature, RavenPoint, RavenViewport } from '../types';
-
-// Symbol layers (cluster counts) cannot render text without a glyph source.
-const GLYPHS_URL = 'https://fonts.openmaptiles.org/{fontstack}/{range}.pbf';
 
 export type MapFocus = { lat: number; lon: number; zoom: number; token: number } | null;
 
@@ -21,8 +20,7 @@ function featureCollection(features: RavenFeature[], selectedId: string | null) 
       properties: {
         id: feature.id,
         selected: feature.id === selectedId,
-        cameraType: feature.cameraType || 'unknown',
-        mediaType: feature.mediaType,
+        marker: `marker-${markerKey(feature)}`,
         providerId: feature.providerId
       }
     }))
@@ -59,9 +57,12 @@ export function RavenMap({
   outlineEnabled,
   fovEnabled,
   ringsEnabled,
+  recentPoints,
+  recentEnabled,
   focus,
   onViewportChange,
-  onSelect
+  onSelect,
+  onBasemap
 }: {
   initialView: MapView;
   features: RavenFeature[];
@@ -72,9 +73,13 @@ export function RavenMap({
   outlineEnabled: boolean;
   fovEnabled: boolean;
   ringsEnabled: boolean;
+  /** [lon, lat] of cameras newly mapped in OSM since the previous weekly extract. */
+  recentPoints: Array<[number, number]>;
+  recentEnabled: boolean;
   focus: MapFocus;
   onViewportChange: (viewport: RavenViewport) => void;
   onSelect: (id: string) => void;
+  onBasemap?: (source: Basemap['source']) => void;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
@@ -83,182 +88,190 @@ export function RavenMap({
   const initialViewRef = useRef(initialView);
   const onViewportRef = useRef(onViewportChange);
   const onSelectRef = useRef(onSelect);
+  const onBasemapRef = useRef(onBasemap);
 
   useEffect(() => { onViewportRef.current = onViewportChange; }, [onViewportChange]);
   useEffect(() => { onSelectRef.current = onSelect; }, [onSelect]);
+  useEffect(() => { onBasemapRef.current = onBasemap; }, [onBasemap]);
 
   useEffect(() => {
-    if (!containerRef.current || mapRef.current) return;
-    const map = new maplibregl.Map({
-      container: containerRef.current,
-      center: [initialViewRef.current.lon, initialViewRef.current.lat],
-      zoom: initialViewRef.current.zoom,
-      attributionControl: { compact: true },
-      style: {
-        version: 8,
-        glyphs: GLYPHS_URL,
-        sources: {
-          osm: {
-            type: 'raster',
-            tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
-            tileSize: 256,
-            attribution: '© OpenStreetMap contributors'
-          }
-        },
-        layers: [{
-          id: 'osm',
-          type: 'raster',
-          source: 'osm',
+    const container = containerRef.current;
+    if (!container) return;
+    let cancelled = false;
+    let created: MapLibreMap | undefined;
+
+    const createMap = (basemap: Basemap) => {
+      const map = new maplibregl.Map({
+        container,
+        center: [initialViewRef.current.lon, initialViewRef.current.lat],
+        zoom: initialViewRef.current.zoom,
+        attributionControl: { compact: true },
+        style: basemap.style
+      });
+
+      map.addControl(new maplibregl.NavigationControl({ showCompass: true }), 'top-right');
+
+      const emitViewport = () => {
+        const center = map.getCenter();
+        const bounds = map.getBounds();
+        onViewportRef.current(normalizeViewport({
+          center: { lat: center.lat, lon: center.lng },
+          bounds: {
+            west: bounds.getWest(),
+            south: bounds.getSouth(),
+            east: bounds.getEast(),
+            north: bounds.getNorth()
+          },
+          zoom: map.getZoom()
+        }));
+      };
+
+      map.on('load', () => {
+        map.addSource('contacts', {
+          type: 'geojson',
+          data: featureCollection([], null),
+          cluster: true,
+          clusterRadius: 48,
+          clusterMaxZoom: 14
+        });
+        map.addSource('contacts-heat', { type: 'geojson', data: featureCollection([], null) });
+        map.addSource('scan-area', { type: 'geojson', data: boundsPolygon() });
+        map.addSource('fov', { type: 'geojson', data: EMPTY_COLLECTION });
+        map.addSource('rings', { type: 'geojson', data: EMPTY_COLLECTION });
+        map.addSource('recent', { type: 'geojson', data: EMPTY_COLLECTION });
+
+        map.addLayer({
+          id: 'contacts-heat',
+          type: 'heatmap',
+          source: 'contacts-heat',
+          maxzoom: 16,
           paint: {
-            'raster-saturation': -0.85,
-            'raster-brightness-min': 0.12,
-            'raster-brightness-max': 0.48,
-            'raster-contrast': 0.3,
-            'raster-hue-rotate': 70
+            'heatmap-weight': 0.75,
+            'heatmap-intensity': 1.1,
+            'heatmap-radius': 28,
+            'heatmap-opacity': 0,
+            // Magnitude is sequential: one hue, dark to light on the dark map.
+            'heatmap-color': ['interpolate', ['linear'], ['heatmap-density'],
+              0, 'rgba(24, 79, 149, 0)', 0.2, '#184f95', 0.45, '#2a78d6', 0.7, '#6da7ec', 1, '#cde2fb']
           }
-        }]
-      }
-    });
+        });
 
-    map.addControl(new maplibregl.NavigationControl({ showCompass: true }), 'top-right');
+        map.addLayer({
+          id: 'rings-line',
+          type: 'line',
+          source: 'rings',
+          filter: ['==', ['geometry-type'], 'LineString'],
+          layout: { visibility: 'none' },
+          paint: { 'line-color': '#8b97ab', 'line-width': 1, 'line-opacity': 0.55, 'line-dasharray': [4, 3] }
+        });
+        map.addLayer({
+          id: 'rings-label',
+          type: 'symbol',
+          source: 'rings',
+          filter: ['==', ['geometry-type'], 'Point'],
+          layout: { visibility: 'none', 'text-field': ['get', 'label'], 'text-font': basemap.textFont, 'text-size': 10, 'text-offset': [0, -0.8] },
+          paint: { 'text-color': '#c1cad8', 'text-halo-color': '#0a0e15', 'text-halo-width': 1.5 }
+        });
 
-    const emitViewport = () => {
-      const center = map.getCenter();
-      const bounds = map.getBounds();
-      onViewportRef.current(normalizeViewport({
-        center: { lat: center.lat, lon: center.lng },
-        bounds: {
-          west: bounds.getWest(),
-          south: bounds.getSouth(),
-          east: bounds.getEast(),
-          north: bounds.getNorth()
-        },
-        zoom: map.getZoom()
-      }));
+        // Wedges are tens of metres across, so they only read once zoomed in.
+        map.addLayer({ id: 'fov-fill', type: 'fill', source: 'fov', minzoom: 15, layout: { visibility: 'none' }, paint: { 'fill-color': '#ffffff', 'fill-opacity': 0.08 } });
+        map.addLayer({ id: 'fov-line', type: 'line', source: 'fov', minzoom: 15, layout: { visibility: 'none' }, paint: { 'line-color': '#ffffff', 'line-width': 1, 'line-opacity': 0.3 } });
+
+        map.addLayer({
+          id: 'recent-halo',
+          type: 'circle',
+          source: 'recent',
+          layout: { visibility: 'none' },
+          paint: { 'circle-radius': 10, 'circle-opacity': 0, 'circle-stroke-color': '#ffffff', 'circle-stroke-width': 1.5, 'circle-stroke-opacity': 0.85 }
+        });
+
+        map.addLayer({
+          id: 'clusters',
+          type: 'circle',
+          source: 'contacts',
+          filter: ['has', 'point_count'],
+          paint: {
+            'circle-color': '#141b2b',
+            'circle-stroke-color': '#8b93ff',
+            'circle-stroke-width': 1.5,
+            'circle-radius': ['step', ['get', 'point_count'], 16, 25, 20, 100, 25, 500, 31],
+            'circle-opacity': 0.93
+          }
+        });
+
+        map.addLayer({
+          id: 'cluster-count',
+          type: 'symbol',
+          source: 'contacts',
+          filter: ['has', 'point_count'],
+          layout: { 'text-field': ['get', 'point_count_abbreviated'], 'text-font': basemap.textFont, 'text-size': 11 },
+          paint: { 'text-color': '#f3f6fb' }
+        });
+
+        map.addLayer({
+          id: 'contacts-selected',
+          type: 'circle',
+          source: 'contacts',
+          filter: ['all', ['!', ['has', 'point_count']], ['==', ['get', 'selected'], true]],
+          paint: { 'circle-radius': 16, 'circle-color': '#ffffff', 'circle-opacity': 0.08, 'circle-stroke-color': '#ffffff', 'circle-stroke-width': 2 }
+        });
+
+        // Class is encoded twice: hue and shape (see markers.ts).
+        for (const item of MARKER_CLASSES) map.addImage(`marker-${item.key}`, markerBitmap(item), { pixelRatio: 2 });
+        map.addLayer({
+          id: 'contacts-points',
+          type: 'symbol',
+          source: 'contacts',
+          filter: ['!', ['has', 'point_count']],
+          layout: {
+            'icon-image': ['get', 'marker'],
+            'icon-size': ['case', ['==', ['get', 'selected'], true], 1.3, 1],
+            'icon-allow-overlap': true,
+            'icon-ignore-placement': true
+          }
+        });
+
+        map.addLayer({ id: 'scan-area-fill', type: 'fill', source: 'scan-area', paint: { 'fill-color': '#8b93ff', 'fill-opacity': 0.03 } });
+        map.addLayer({ id: 'scan-area-line', type: 'line', source: 'scan-area', paint: { 'line-color': '#8b93ff', 'line-width': 1.2, 'line-opacity': 0.75, 'line-dasharray': [2, 2] } });
+
+        map.on('click', 'contacts-points', event => {
+          const id = event.features?.[0]?.properties?.id;
+          if (id) onSelectRef.current(String(id));
+        });
+
+        map.on('click', 'clusters', event => {
+          const feature = event.features?.[0];
+          const clusterId = Number(feature?.properties?.cluster_id);
+          const coordinates = (feature?.geometry as any)?.coordinates as [number, number] | undefined;
+          if (!Number.isFinite(clusterId) || !coordinates) return;
+          const source = map.getSource('contacts') as any;
+          Promise.resolve(source.getClusterExpansionZoom(clusterId)).then((zoom: number) => {
+            map.easeTo({ center: coordinates, zoom });
+          }).catch(() => undefined);
+        });
+
+        for (const layer of ['contacts-points', 'clusters']) {
+          map.on('mouseenter', layer, () => { map.getCanvas().style.cursor = 'pointer'; });
+          map.on('mouseleave', layer, () => { map.getCanvas().style.cursor = ''; });
+        }
+        emitViewport();
+        setReady(true);
+      });
+
+      map.on('moveend', emitViewport);
+      return map;
     };
 
-    map.on('load', () => {
-      map.addSource('contacts', {
-        type: 'geojson',
-        data: featureCollection([], null),
-        cluster: true,
-        clusterRadius: 48,
-        clusterMaxZoom: 14
-      });
-      map.addSource('contacts-heat', { type: 'geojson', data: featureCollection([], null) });
-      map.addSource('scan-area', { type: 'geojson', data: boundsPolygon() });
-      map.addSource('fov', { type: 'geojson', data: EMPTY_COLLECTION });
-      map.addSource('rings', { type: 'geojson', data: EMPTY_COLLECTION });
-
-      map.addLayer({
-        id: 'contacts-heat',
-        type: 'heatmap',
-        source: 'contacts-heat',
-        maxzoom: 16,
-        paint: {
-          'heatmap-weight': 0.75,
-          'heatmap-intensity': 1.1,
-          'heatmap-radius': 28,
-          'heatmap-opacity': 0
-        }
-      });
-
-      map.addLayer({
-        id: 'rings-line',
-        type: 'line',
-        source: 'rings',
-        filter: ['==', ['geometry-type'], 'LineString'],
-        layout: { visibility: 'none' },
-        paint: { 'line-color': '#65f0b5', 'line-width': 1, 'line-opacity': 0.45, 'line-dasharray': [4, 3] }
-      });
-      map.addLayer({
-        id: 'rings-label',
-        type: 'symbol',
-        source: 'rings',
-        filter: ['==', ['geometry-type'], 'Point'],
-        layout: { visibility: 'none', 'text-field': ['get', 'label'], 'text-font': ['Open Sans Bold'], 'text-size': 10, 'text-offset': [0, -0.8] },
-        paint: { 'text-color': '#65f0b5', 'text-halo-color': '#07100d', 'text-halo-width': 1.5 }
-      });
-
-      // Wedges are tens of metres across, so they only read once zoomed in.
-      map.addLayer({ id: 'fov-fill', type: 'fill', source: 'fov', minzoom: 15, layout: { visibility: 'none' }, paint: { 'fill-color': '#62f2ff', 'fill-opacity': 0.12 } });
-      map.addLayer({ id: 'fov-line', type: 'line', source: 'fov', minzoom: 15, layout: { visibility: 'none' }, paint: { 'line-color': '#62f2ff', 'line-width': 1, 'line-opacity': 0.5 } });
-
-      map.addLayer({
-        id: 'clusters',
-        type: 'circle',
-        source: 'contacts',
-        filter: ['has', 'point_count'],
-        paint: {
-          'circle-color': '#153d32',
-          'circle-stroke-color': '#65f0b5',
-          'circle-stroke-width': 1.5,
-          'circle-radius': ['step', ['get', 'point_count'], 16, 25, 20, 100, 25, 500, 31],
-          'circle-opacity': 0.93
-        }
-      });
-
-      map.addLayer({
-        id: 'cluster-count',
-        type: 'symbol',
-        source: 'contacts',
-        filter: ['has', 'point_count'],
-        layout: { 'text-field': ['get', 'point_count_abbreviated'], 'text-font': ['Open Sans Bold'], 'text-size': 11 },
-        paint: { 'text-color': '#d9ffec' }
-      });
-
-      map.addLayer({
-        id: 'contacts-points',
-        type: 'circle',
-        source: 'contacts',
-        filter: ['!', ['has', 'point_count']],
-        paint: {
-          'circle-radius': ['case', ['==', ['get', 'selected'], true], 8, 5.5],
-          'circle-color': [
-            'case',
-            ['==', ['get', 'selected'], true], '#62f2ff',
-            ['==', ['get', 'mediaType'], 'stream'], '#62f2ff',
-            ['==', ['get', 'mediaType'], 'snapshot'], '#65f0b5',
-            ['==', ['get', 'cameraType'], 'speed'], '#ff875f',
-            '#ffc857'
-          ],
-          'circle-stroke-color': '#07100d',
-          'circle-stroke-width': 2,
-          'circle-opacity': 0.96
-        }
-      });
-
-      map.addLayer({ id: 'scan-area-fill', type: 'fill', source: 'scan-area', paint: { 'fill-color': '#65f0b5', 'fill-opacity': 0.025 } });
-      map.addLayer({ id: 'scan-area-line', type: 'line', source: 'scan-area', paint: { 'line-color': '#65f0b5', 'line-width': 1.2, 'line-opacity': 0.7, 'line-dasharray': [2, 2] } });
-
-      map.on('click', 'contacts-points', event => {
-        const id = event.features?.[0]?.properties?.id;
-        if (id) onSelectRef.current(String(id));
-      });
-
-      map.on('click', 'clusters', event => {
-        const feature = event.features?.[0];
-        const clusterId = Number(feature?.properties?.cluster_id);
-        const coordinates = (feature?.geometry as any)?.coordinates as [number, number] | undefined;
-        if (!Number.isFinite(clusterId) || !coordinates) return;
-        const source = map.getSource('contacts') as any;
-        Promise.resolve(source.getClusterExpansionZoom(clusterId)).then((zoom: number) => {
-          map.easeTo({ center: coordinates, zoom });
-        }).catch(() => undefined);
-      });
-
-      for (const layer of ['contacts-points', 'clusters']) {
-        map.on('mouseenter', layer, () => { map.getCanvas().style.cursor = 'pointer'; });
-        map.on('mouseleave', layer, () => { map.getCanvas().style.cursor = ''; });
-      }
-      emitViewport();
-      setReady(true);
+    void loadBasemap().then(basemap => {
+      if (cancelled) return;
+      onBasemapRef.current?.(basemap.source);
+      created = createMap(basemap);
+      mapRef.current = created;
     });
 
-    map.on('moveend', emitViewport);
-    mapRef.current = map;
     return () => {
-      map.remove();
+      cancelled = true;
+      created?.remove();
       mapRef.current = null;
       setReady(false);
     };
@@ -276,8 +289,8 @@ export function RavenMap({
     const map = mapRef.current;
     if (!map || !ready) return;
     (map.getSource('scan-area') as GeoJSONSource | undefined)?.setData(boundsPolygon(scanBounds) as any);
-    map.setPaintProperty('scan-area-line', 'line-opacity', outlineEnabled ? 0.7 : 0);
-    map.setPaintProperty('scan-area-fill', 'fill-opacity', outlineEnabled ? 0.025 : 0);
+    map.setPaintProperty('scan-area-line', 'line-opacity', outlineEnabled ? 0.75 : 0);
+    map.setPaintProperty('scan-area-fill', 'fill-opacity', outlineEnabled ? 0.03 : 0);
   }, [ready, scanBounds, outlineEnabled]);
 
   useEffect(() => {
@@ -299,6 +312,17 @@ export function RavenMap({
     (map.getSource('rings') as GeoJSONSource | undefined)?.setData(ringsEnabled ? rangeRingCollection(origin) : EMPTY_COLLECTION);
     for (const layer of ['rings-line', 'rings-label']) map.setLayoutProperty(layer, 'visibility', ringsEnabled ? 'visible' : 'none');
   }, [ready, origin, ringsEnabled]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    const data = {
+      type: 'FeatureCollection' as const,
+      features: recentEnabled ? recentPoints.map(coordinates => ({ type: 'Feature' as const, properties: {}, geometry: { type: 'Point' as const, coordinates } })) : []
+    };
+    (map.getSource('recent') as GeoJSONSource | undefined)?.setData(data);
+    map.setLayoutProperty('recent-halo', 'visibility', recentEnabled ? 'visible' : 'none');
+  }, [ready, recentPoints, recentEnabled]);
 
   useEffect(() => {
     if (!focus || !mapRef.current) return;

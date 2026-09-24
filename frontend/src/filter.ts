@@ -1,4 +1,4 @@
-import { shortClassLabel } from './labels';
+import { MARKER_BY_KEY, markerKey, markerTag } from './markers';
 import type { RavenFeature } from './types';
 
 /** True when every whitespace-separated term appears in one of the feature's descriptive fields. */
@@ -13,7 +13,8 @@ export function matchesFilter(feature: RavenFeature, query: string): boolean {
     feature.directionLabel,
     feature.providerId,
     feature.cameraType,
-    shortClassLabel(feature)
+    MARKER_BY_KEY[markerKey(feature)].label,
+    markerTag(feature)
   ].filter(Boolean).join(' ').toLowerCase();
   return terms.every(term => haystack.includes(term));
 }

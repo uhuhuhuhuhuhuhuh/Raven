@@ -47,6 +47,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - uses: actions/configure-pages@v5
+        id: pages
       - name: Week stamp for the OpenStreetMap extract
         id: osm-week
         run: echo "week=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
@@ -69,8 +71,10 @@ jobs:
           sudo apt-get install -y -q --no-install-recommends osmium-tool
           python -m pip install -r scripts/requirements-osm.txt
           scripts/fetch-geofabrik-cameras.sh north-america/us "$RUNNER_TEMP/osm"
+          # osm-tiles holds last week's build when the cache restored one, so changes.json diffs against it.
           python scripts/build_osm_tiles.py --pbf "$RUNNER_TEMP/osm/cameras.osm.pbf" --poly "$RUNNER_TEMP/osm/region.poly" \
-            --source "Geofabrik north-america/us" --out "$RUNNER_TEMP/osm-tiles"
+            --source "Geofabrik north-america/us" --out "$RUNNER_TEMP/osm-tiles" \
+            --previous osm-tiles --site-url "${{ steps.pages.outputs.base_url }}"
           rm -rf osm-tiles && mv "$RUNNER_TEMP/osm-tiles" osm-tiles
       - name: Publish OpenStreetMap camera tiles with the site
         run: |
@@ -81,8 +85,9 @@ jobs:
           fi
       - name: Build static camera/stream API
         working-directory: frontend
-        run: npm run build:api
-      - uses: actions/configure-pages@v5
+        timeout-minutes: 10
+        # --check-streams marks which published live streams answered (a few minutes daily).
+        run: npm run build:api -- dist/api/v1 --check-streams
       - uses: actions/upload-pages-artifact@v3
         with:
           path: frontend/dist

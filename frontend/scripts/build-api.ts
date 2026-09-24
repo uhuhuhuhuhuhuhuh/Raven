@@ -2,7 +2,10 @@
  * Writes Raven's static JSON API (index, cameras, streams) by running the same
  * browser providers the map uses over each provider's full coverage area.
  *
- *   npm run build:api -- [output directory, default dist/api/v1]
+ *   npm run build:api -- [output directory, default dist/api/v1] [--check-streams]
+ *
+ * --check-streams requests each published live-stream playlist once (24 at a time, 5 s
+ * timeout, 5 min budget) and records whether it answered. CI passes it on its daily build; local launches skip it.
  *
  * A provider that fails is recorded in index.json rather than failing the build,
  * so a temporarily unavailable agency service never blocks a deploy.
@@ -13,8 +16,11 @@ import { caltransProvider } from '../src/providers/caltrans';
 import { fl511Provider } from '../src/providers/fl511';
 import type { RavenProvider } from '../src/providers/types';
 import { buildStaticApi, type ProviderCatalogResult } from '../src/staticApi';
+import { checkStreams } from '../src/streamHealth';
 
-const outDir = resolve(process.argv[2] || 'dist/api/v1');
+const args = process.argv.slice(2);
+const outDir = resolve(args.find(arg => !arg.startsWith('--')) || 'dist/api/v1');
+const shouldCheckStreams = args.includes('--check-streams');
 const PROVIDERS: RavenProvider[] = [fl511Provider, caltransProvider];
 
 async function catalog(provider: RavenProvider): Promise<ProviderCatalogResult> {
@@ -28,24 +34,33 @@ async function catalog(provider: RavenProvider): Promise<ProviderCatalogResult> 
   }
 }
 
-async function osmEndpoint(): Promise<Record<string, string>> {
-  try {
-    await readFile(join(outDir, 'osm', 'index.json'));
-    return { osmTiles: 'osm/index.json' };
-  } catch {
-    return {};
+const OSM_ENDPOINTS: Record<string, string> = { osmTiles: 'osm/index.json', osmChanges: 'osm/changes.json', osmChangesFeed: 'osm/changes.atom' };
+
+/** Lists the extract files (tiles, weekly changes, feed) that exist in this build. */
+async function osmEndpoints(): Promise<Record<string, string>> {
+  const present: Record<string, string> = {};
+  for (const [name, path] of Object.entries(OSM_ENDPOINTS)) {
+    try {
+      await readFile(join(outDir, path));
+      present[name] = path;
+    } catch {
+      // Not published in this build.
+    }
   }
+  return present;
 }
 
 const results = await Promise.all(PROVIDERS.map(catalog));
-const files = buildStaticApi(results, new Date().toISOString(), await osmEndpoint());
+const health = shouldCheckStreams ? await checkStreams(results.flatMap(result => result.features || [])) : undefined;
+const files = buildStaticApi(results, new Date().toISOString(), await osmEndpoints(), health);
 await mkdir(outDir, { recursive: true });
 for (const [name, document] of Object.entries(files)) {
   await writeFile(join(outDir, name), JSON.stringify(document));
 }
 
 for (const provider of files['index.json'].providers) {
-  const line = `${provider.id}: ${provider.cameras} cameras, ${provider.streams} live streams (${provider.status})`;
+  const online = 'streamsOnline' in provider ? `, ${provider.streamsOnline} answering` : '';
+  const line = `${provider.id}: ${provider.cameras} cameras, ${provider.streams} live streams${online} (${provider.status})`;
   if (provider.status === 'ok') console.log(line);
   // GitHub Actions turns ::warning:: lines into annotations on the run.
   else console.log(`::warning::${line}${'error' in provider ? ` ${provider.error}` : ''}${'warning' in provider ? ` ${provider.warning}` : ''}`);

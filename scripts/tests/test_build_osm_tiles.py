@@ -90,3 +90,68 @@ def test_cli_replaces_old_output_and_falls_back_to_the_header_box(tmp_path: Path
 def test_cli_requires_a_boundary_when_the_extract_has_no_header_box(tmp_path: Path) -> None:
     with pytest.raises(SystemExit):
         tiles.main(["--pbf", str(write_pbf(tmp_path / "filtered.osm.pbf", box=False)), "--out", str(tmp_path / "osm")])
+
+
+def test_changes_list_cameras_added_and_removed_since_the_previous_build(tmp_path: Path) -> None:
+    previous_out = tmp_path / "last-week"
+    last_week = [(1, 25.76, -80.19, {"man_made": "surveillance"}), (9, 25.70, -80.20, {"man_made": "surveillance"})]
+    tiles.build_tiles(last_week, tiles.parse_poly(POLY), "test", "2026-09-15T20:00:00Z", previous_out)
+
+    out = tmp_path / "osm"
+    cameras, timestamp, _ = tiles.read_cameras(write_pbf(tmp_path / "fl.osm.pbf"))
+    tiles.build_tiles(cameras, tiles.parse_poly(POLY), "test", timestamp, out)
+    changes = tiles.write_changes(out, cameras, tiles.load_previous(previous_out), timestamp)
+
+    assert changes["baseline"] is False
+    assert (changes["since"], changes["until"]) == ("2026-09-15T20:00:00Z", "2026-09-22T20:21:02Z")
+    assert [record[0] for record in changes["added"]] == [2, 4]
+    assert [record[0] for record in changes["removed"]] == [9]
+    assert (changes["addedCount"], changes["removedCount"]) == (2, 1)
+    assert json.loads((out / "changes.json").read_text()) == changes
+    assert "feed" not in changes and not (out / "changes.atom").exists()
+
+
+def test_first_build_writes_a_baseline_and_unreadable_history_is_ignored(tmp_path: Path) -> None:
+    broken = tmp_path / "broken"
+    broken.mkdir()
+    (broken / "index.json").write_text('{"tiles": ["51_-161"]}')  # tile file missing
+    assert tiles.load_previous(broken) is None
+    assert tiles.load_previous(tmp_path / "missing") is None
+    changes = tiles.write_changes(tmp_path, [(1, 25.76, -80.19, {})], None, "2026-09-22T20:21:02Z")
+    assert changes["baseline"] is True
+    assert changes["added"] == [] and changes["addedCount"] == 0
+
+
+def test_atom_feed_links_each_newly_mapped_camera_to_the_map(tmp_path: Path) -> None:
+    from xml.etree import ElementTree
+
+    changes = tiles.write_changes(
+        tmp_path,
+        [(1, 25.76, -80.19, {"man_made": "surveillance"}), (5, 27.95, -82.46, {"man_made": "surveillance", "surveillance:type": "ALPR", "manufacturer": "Flock Safety"})],
+        ({1: [1, 25.76, -80.19, {"man_made": "surveillance"}]}, "2026-09-15T20:00:00Z"),
+        "2026-09-22T20:21:02Z",
+        site_url="https://example.github.io/Raven",
+    )
+    assert changes["addedCount"] == 1
+    assert changes["feed"] == "changes.atom"
+    assert json.loads((tmp_path / "changes.json").read_text())["feed"] == "changes.atom"
+    ns = {"atom": "http://www.w3.org/2005/Atom"}
+    feed = ElementTree.fromstring((tmp_path / "changes.atom").read_bytes())
+    entries = feed.findall("atom:entry", ns)
+    assert len(entries) == 1
+    assert entries[0].findtext("atom:title", namespaces=ns) == "Newly mapped plate reader (ALPR): Flock Safety"
+    assert entries[0].findtext("atom:id", namespaces=ns) == "https://www.openstreetmap.org/node/5"
+    assert entries[0].find("atom:link", ns).get("href") == "https://example.github.io/Raven/#map=18.00/27.95000/-82.46000"
+    assert feed.findtext("atom:updated", namespaces=ns) == "2026-09-22T20:21:02Z"
+
+
+def test_cli_reads_the_previous_build_even_when_it_is_the_output_directory(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    out = tmp_path / "osm"
+    tiles.build_tiles([(9, 25.70, -80.20, {"man_made": "surveillance"})], tiles.parse_poly(POLY), "test", "2026-09-15T20:00:00Z", out)
+    pbf = str(write_pbf(tmp_path / "fl.osm.pbf"))
+    assert tiles.main(["--pbf", pbf, "--out", str(out), "--previous", str(out), "--site-url", "https://example.github.io/Raven/"]) == 0
+    changes = json.loads((out / "changes.json").read_text())
+    assert (changes["addedCount"], changes["removedCount"]) == (3, 1)
+    assert json.loads((out / "index.json").read_text())["changes"] == "changes.json"
+    assert (out / "changes.atom").exists()
+    assert "3 newly mapped, 1 removed" in capsys.readouterr().out

@@ -19,7 +19,10 @@
     "build:api": "vite-node scripts/build-api.ts"
   },
   "dependencies": {
+    "@fontsource-variable/inter": "5.3.0",
+    "@fontsource-variable/jetbrains-mono": "5.3.0",
     "hls.js": "1.7.3",
+    "lucide-react": "1.47.0",
     "maplibre-gl": "5.7.1",
     "react": "19.1.1",
     "react-dom": "19.1.1"

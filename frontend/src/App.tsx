@@ -1,29 +1,54 @@
-import { FormEvent, useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
+import { FormEvent, useCallback, useEffect, useMemo, useReducer, useRef, useState, type ComponentType } from 'react';
+import {
+  Activity,
+  ArrowRight,
+  Crosshair,
+  Database,
+  Download,
+  Eye,
+  ExternalLink,
+  Filter,
+  Layers,
+  List,
+  LocateFixed,
+  MapPinPlus,
+  PencilLine,
+  Radar,
+  RefreshCw,
+  Rss,
+  Search,
+  Target,
+  TerminalSquare,
+  Trash2,
+  X
+} from 'lucide-react';
 import { clearProviderCache, getCachedProviderScan, putCachedProviderScan } from './cache';
 import { CameraViewer } from './components/CameraViewer';
 import { LayerPanel } from './components/LayerPanel';
+import { MarkerSwatch } from './components/MarkerSwatch';
 import { RavenMap, type MapFocus } from './components/RavenMap';
 import { VirtualContactList, type EnrichedFeature } from './components/VirtualContactList';
+import { downloadGeoJson, featuresToGeoJson } from './exportGeoJson';
 import { matchesFilter } from './filter';
 import { bearingDegrees, distanceMeters, formatRange } from './geo';
-import { classLabel } from './labels';
+import { MARKER_BY_KEY, MARKER_CLASSES, markerKey, type MarkerKey } from './markers';
 import { abortError } from './net';
+import { osmAddUrl, osmEditUrl } from './osmLinks';
 import { formatViewHash, parseViewHash } from './permalink';
 import { loadPreferences, savePreferences } from './preferences';
+import { loadOsmChanges, type OsmChanges } from './providers/osmTiles';
 import { providerById, providerPlan, ravenProviders } from './providers/registry';
 import { searchPlace } from './search';
 import {
   allFeatures,
   createInitialState,
   DEFAULT_VIEW,
-  hasSnapshot,
-  hasStream,
   LAYER_KEYS,
   logEntry,
   ravenReducer,
   visibleFeatures
 } from './state';
-import type { LayerKey, RavenFeature, RavenMode, RavenViewport } from './types';
+import type { LayerKey, ProviderRun, RavenFeature, RavenLogEntry, RavenMode, RavenViewport } from './types';
 
 // Raven's static API (camera catalog, OSM extract tiles) sits beside the app on Pages and in Raven Local.
 const STATIC_API_BASE = new URL('api/v1/', document.baseURI).href;
@@ -60,9 +85,13 @@ export default function App() {
   const [clock, setClock] = useState(new Date());
   const [query, setQuery] = useState('');
   const [registerFilter, setRegisterFilter] = useState('');
+  const [osmChanges, setOsmChanges] = useState<OsmChanges | null>(null);
   const [activity, setActivity] = useState('READY');
   const [focus, setFocus] = useState<MapFocus>(null);
-  const [mobilePanel, setMobilePanel] = useState<'none' | 'contacts' | 'layers' | 'log'>('none');
+  const [mobilePanel, setMobilePanel] = useState<'none' | 'contacts' | 'side'>('none');
+  const [sideTab, setSideTab] = useState<SideTab>('overview');
+  // Scans wait for the map's first real viewport; before that the bounds are a placeholder.
+  const [mapReady, setMapReady] = useState(false);
   const scanControllerRef = useRef<AbortController | null>(null);
   const searchControllerRef = useRef<AbortController | null>(null);
 
@@ -74,17 +103,18 @@ export default function App() {
     azimuth: bearingDegrees(state.referenceOrigin.lat, state.referenceOrigin.lon, feature.lat, feature.lon)
   })).sort((a, b) => a.distance - b.distance), [visible, state.referenceOrigin]);
   const selected = enriched.find(feature => feature.id === state.selectionId) || null;
+  const recentPoints = useMemo(() => osmChanges?.added.map(([, lat, lon]) => [lon, lat] as [number, number]) ?? [], [osmChanges]);
   const registerFeatures = useMemo(
     () => (registerFilter.trim() ? enriched.filter(feature => matchesFilter(feature, registerFilter)) : enriched),
     [enriched, registerFilter]
   );
 
-  const mediaCounts = useMemo(() => ({
-    snapshot: visible.filter(hasSnapshot).length,
-    stream: visible.filter(hasStream).length,
-    mapped: visible.filter(feature => !hasSnapshot(feature) && !hasStream(feature)).length,
-    speed: visible.filter(feature => feature.cameraType === 'speed').length
-  }), [visible]);
+  const classCounts = useMemo(() => {
+    const counts: Record<MarkerKey, number> = { stream: 0, snapshot: 0, alpr: 0, speed: 0, mapped: 0 };
+    for (const feature of visible) counts[markerKey(feature)] += 1;
+    return counts;
+  }, [visible]);
+  const facingCount = useMemo(() => visible.filter(feature => feature.bearing !== undefined).length, [visible]);
 
   const addLog = useCallback((channel: string, message: string, level: 'info' | 'warn' | 'error' = 'info') => {
     dispatch({ type: 'LOG', entry: logEntry(channel, message, level) });
@@ -101,6 +131,17 @@ export default function App() {
       scanControllerRef.current?.abort();
       searchControllerRef.current?.abort();
     };
+  }, [addLog]);
+
+  // Weekly extract changes, when the deploy published them.
+  useEffect(() => {
+    let active = true;
+    void loadOsmChanges(STATIC_API_BASE).then(changes => {
+      if (!active || !changes) return;
+      setOsmChanges(changes);
+      addLog('OSM', `${changes.addedCount} CAMERAS NEWLY MAPPED SINCE ${changes.since?.slice(0, 10) ?? 'THE LAST EXTRACT'}`);
+    });
+    return () => { active = false; };
   }, [addLog]);
 
   useEffect(() => {
@@ -140,7 +181,7 @@ export default function App() {
   }, [state.selectionId, visible]);
 
   const runScan = useCallback(async (reason: 'manual' | 'auto' = 'manual') => {
-    if (state.mode === 'detecting') return;
+    if (state.mode === 'detecting' || !mapReady) return;
     scanControllerRef.current?.abort();
     const controller = new AbortController();
     scanControllerRef.current = controller;
@@ -256,7 +297,7 @@ export default function App() {
     dispatch({ type: 'SCAN_FINISH', scanId: id, status: finalStatus, timestamp: Date.now() });
     setActivity('READY');
     addLog('SCAN', finalStatus === 'partial' ? 'COMPLETE WITH DEGRADED PROVIDERS' : finalStatus === 'error' ? 'FAILED' : 'COMPLETE', finalStatus === 'error' ? 'error' : finalStatus === 'partial' ? 'warn' : 'info');
-  }, [state.mode, state.viewport.bounds, state.viewport.center, state.viewport.zoom, addLog]);
+  }, [state.mode, mapReady, state.viewport.bounds, state.viewport.center, state.viewport.zoom, addLog]);
 
   useEffect(() => {
     if (!state.autoScan || state.mode === 'detecting' || state.scan.status !== 'dirty') return;
@@ -265,6 +306,7 @@ export default function App() {
   }, [state.autoScan, state.mode, state.scan.status, state.viewport.bounds, runScan]);
 
   const handleViewport = useCallback((viewport: RavenViewport) => {
+    setMapReady(true);
     dispatch({ type: 'VIEWPORT_CHANGED', viewport });
   }, []);
 
@@ -316,49 +358,35 @@ export default function App() {
     addLog('LAYER', `${layer.toUpperCase()} TOGGLED`);
   }
 
+  function exportView() {
+    const stamp = new Date().toISOString();
+    downloadGeoJson(`raven-cameras-${stamp.slice(0, 10)}.geojson`, featuresToGeoJson(visible, stamp));
+    addLog('EXPORT', `${visible.length} VISIBLE CONTACTS EXPORTED AS GEOJSON`);
+  }
+
   async function clearCache() {
     await clearProviderCache();
     addLog('CACHE', 'BROWSER PROVIDER CACHE CLEARED');
   }
 
-  const statusLabel = activity !== 'READY' ? activity : ({
-    idle: 'READY TO SCAN',
-    dirty: 'RESULTS STALE',
-    scanning: 'SCANNING',
-    partial: 'PARTIAL',
-    ready: 'READY',
-    error: 'SOURCE ERROR'
-  } as const)[state.scan.status];
+  const statusLabel = ACTIVITY_LABEL[activity] ?? SCAN_STATUS_LABEL[state.scan.status];
+  const statusTone = state.scan.status === 'error' ? 'bad'
+    : state.scan.status === 'dirty' || state.scan.status === 'partial' ? 'warn'
+    : activity !== 'READY' || state.scan.status === 'scanning' ? 'busy'
+    : 'ok';
+  const canScan = state.mode !== 'detecting' && mapReady && state.scan.status !== 'scanning';
+  const nearest = enriched[0];
+  const selectedClass = selected ? MARKER_BY_KEY[markerKey(selected)] : null;
+  const selectedEditUrl = selected ? osmEditUrl(selected) : undefined;
 
-  const statusBad = state.scan.status === 'error';
-  const statusWarn = state.scan.status === 'dirty' || state.scan.status === 'partial';
+  function openSide(tab: SideTab) {
+    setSideTab(tab);
+    setMobilePanel('side');
+  }
 
   return (
-    <div className={`raven-shell scan-${state.scan.status}`}>
-      <header className="top-hud panel">
-        <div className="brand-block"><div className="brand-mark">R</div><div><strong>RAVEN</strong><span>OPEN-DATA AWARENESS GRID</span></div></div>
-        <HudMetric label="REFERENCE ORIGIN" value={`${state.referenceOrigin.lat.toFixed(4)}, ${state.referenceOrigin.lon.toFixed(4)}`} sub={state.referenceOrigin.source.toUpperCase()} />
-        <HudMetric label="GRID TIME" value={`${clock.toISOString().slice(11, 19)} UTC`} />
-        <HudMetric label="VIEW" value={`z${state.viewport.zoom.toFixed(1)}`} sub={state.scan.status === 'dirty' ? 'STALE' : 'SYNC'} />
-        <HudMetric label="VISIBLE" value={String(enriched.length).padStart(4, '0')} sub={`${fetched.length} FETCHED`} />
-        <form className="search-box" onSubmit={submitSearch}><input aria-label="Search city, address, or coordinates" value={query} onChange={event => setQuery(event.target.value)} placeholder="SEARCH CITY / ADDRESS / LAT,LON" /><button type="submit">GO</button></form>
-        <div className="system-block"><span>SYSTEM</span><strong role="status" className={statusBad ? 'bad' : statusWarn ? 'warn' : ''}>● {statusLabel}</strong><small>MODE {state.mode.toUpperCase()}</small></div>
-      </header>
-
-      <aside className={`contact-register panel ${mobilePanel === 'contacts' ? 'mobile-open' : ''}`}>
-        <div className="panel-title"><span>CONTACT REGISTER</span><small>{registerFilter.trim() ? `${registerFeatures.length} / ${enriched.length}` : enriched.length} VISIBLE</small><button className="mobile-close" aria-label="Close contacts" onClick={() => setMobilePanel('none')}>×</button></div>
-        <input
-          className="register-filter"
-          type="search"
-          aria-label="Filter contact register"
-          placeholder="FILTER NAME / ROUTE / OPERATOR"
-          value={registerFilter}
-          onChange={event => setRegisterFilter(event.target.value)}
-        />
-        <VirtualContactList features={registerFeatures} selectedId={state.selectionId} onSelect={id => dispatch({ type: 'SELECT', id })} />
-      </aside>
-
-      <main className="map-stage">
+    <div className={`raven-app scan-${state.scan.status}`}>
+      <div className="map-layer">
         <RavenMap
           initialView={initialView}
           features={visible}
@@ -369,101 +397,269 @@ export default function App() {
           outlineEnabled={state.layers.scanOutline}
           fovEnabled={state.layers.fov}
           ringsEnabled={state.layers.rings}
+          recentPoints={recentPoints}
+          recentEnabled={state.layers.recent}
           focus={focus}
           onViewportChange={handleViewport}
           onSelect={id => dispatch({ type: 'SELECT', id })}
+          onBasemap={source => addLog('MAP', source === 'openfreemap' ? 'BASEMAP · OPENFREEMAP VECTOR' : 'BASEMAP UNAVAILABLE · OSM RASTER FALLBACK', source === 'openfreemap' ? 'info' : 'warn')}
         />
-        <div className="map-grid-overlay" />
-        <div className="origin-reticle" aria-hidden="true"><span /><span /></div>
-        {state.scan.status === 'scanning' && <div className="scan-sweep" />}
-        {state.scan.status === 'dirty' && <div className="stale-banner">VIEWPORT CHANGED · RESULTS ARE FROM THE PREVIOUS SCAN <button onClick={() => void runScan('manual')}>RESCAN</button></div>}
-        {selected && (
-          <section className="detail-card panel">
-            <div className="panel-title"><span>CONTACT DETAIL</span><button aria-label="Close contact detail" onClick={() => dispatch({ type: 'SELECT', id: null })}>×</button></div>
-            <strong className="detail-name">{selected.name || 'CAMERA'}</strong>
-            <CameraViewer key={selected.id} feature={selected} />
-            <dl>
-              <div><dt>CLASS</dt><dd>{classLabel(selected)}</dd></div>
-              <div><dt>RANGE</dt><dd>{formatRange(selected.distance)}</dd></div>
-              <div><dt>AZIMUTH</dt><dd>{Math.round(selected.azimuth)}°</dd></div>
-              <div><dt>COORD</dt><dd>{selected.lat.toFixed(6)}, {selected.lon.toFixed(6)}</dd></div>
-              <div><dt>DIRECTION</dt><dd>{selected.directionLabel || (selected.bearing === undefined ? 'UNKNOWN' : `${selected.bearing}°`)}</dd></div>
-              <div><dt>OPERATOR</dt><dd>{selected.operator || 'UNSPECIFIED'}</dd></div>
-              <div><dt>PROVIDER</dt><dd>{providerById(selected.providerId)?.name || selected.providerId}</dd></div>
-              {selected.sourceUpdatedAt && <div><dt>SOURCE UPDATE</dt><dd>{selected.sourceUpdatedAt}</dd></div>}
-            </dl>
-            <details className="debug-details"><summary>PROVIDER / RAW METADATA</summary><pre>{JSON.stringify(selected.metadata, null, 2)}</pre></details>
-            <div className="detail-source">{selected.attribution || selected.providerId}</div>
-            {selected.sourceUrl && <a href={selected.sourceUrl} target="_blank" rel="noreferrer">OPEN OFFICIAL / PUBLIC SOURCE ↗</a>}
-          </section>
-        )}
-      </main>
+        <div className="map-vignette" aria-hidden="true" />
+        <div className="origin-reticle" aria-hidden="true" />
+        {state.scan.status === 'scanning' && <div className="scan-sweep" aria-hidden="true" />}
+      </div>
 
-      <aside className={`analytics-rail panel ${mobilePanel === 'layers' ? 'mobile-open' : ''}`}>
-        <div className="mobile-panel-head"><span>ANALYTICS / LAYERS</span><button aria-label="Close layers" onClick={() => setMobilePanel('none')}>×</button></div>
-        <MetricCard label="VISIBLE CONTACTS" value={String(enriched.length)} sub={`${fetched.length} FETCHED`} />
-        <section className="analytics-card classification-grid">
-          <div className="section-label">MEDIA / CLASSIFICATION</div>
-          <ClassCount label="MAPPED" value={mediaCounts.mapped} />
-          <ClassCount label="SNAPSHOT" value={mediaCounts.snapshot} />
-          <ClassCount label="STREAM" value={mediaCounts.stream} />
-          <ClassCount label="SPEED" value={mediaCounts.speed} />
-        </section>
-        <MetricCard label="NEAREST" value={enriched[0] ? formatRange(enriched[0].distance) : '—'} sub={enriched[0] ? classLabel(enriched[0]) : 'NO VISIBLE CONTACT'} />
-        <section className="analytics-card provider-health">
-          <div className="section-label">PROVIDER HEALTH</div>
-          {ravenProviders.map(provider => {
-            const run = state.providers[provider.id];
-            const label = run?.status || 'idle';
-            const progress = run?.progress ? ` · ${run.progress.completed}/${run.progress.total}` : '';
-            return <div className={`health-line status-${label}`} key={provider.id}>
-              <span>{provider.name}</span>
-              <strong>{label.toUpperCase()}{run?.features.length ? ` · ${run.features.length}` : ''}{progress}{run?.fromCache ? ' · CACHE' : ''}</strong>
-              {run?.skipReason && <small>{run.skipReason}</small>}
-              {run?.warning && <small className="warning-text">{run.warning}</small>}
-              {run?.error && <small>{run.error}</small>}
-            </div>;
-          })}
-        </section>
-        <LayerPanel
-          layers={state.layers}
-          autoScan={state.autoScan}
-          onToggle={toggleLayer}
-          onAutoScan={value => { dispatch({ type: 'AUTO_SCAN_SET', value }); addLog('SCAN', `AUTO SCAN ${value ? 'ENABLED' : 'DISABLED'}`); }}
-        />
+      <header className="topbar glass">
+        <div className="brand">
+          <span className="brand-mark"><Radar size={18} strokeWidth={2.2} /></span>
+          <span className="brand-text"><strong>Raven</strong><small>Open-data camera awareness</small></span>
+        </div>
+        <form className="search" role="search" onSubmit={submitSearch}>
+          <Search size={16} aria-hidden="true" />
+          <input aria-label="Search city, address, or coordinates" value={query} onChange={event => setQuery(event.target.value)} placeholder="Search a place, address or lat, lon" />
+          <button type="submit" className="icon-button" aria-label="Go"><ArrowRight size={16} /></button>
+        </form>
+        <div className="telemetry">
+          <Telemetry label="Origin" value={`${state.referenceOrigin.lat.toFixed(4)}, ${state.referenceOrigin.lon.toFixed(4)}`} sub={state.referenceOrigin.source} />
+          <Telemetry label="Zoom" value={`z${state.viewport.zoom.toFixed(1)}`} sub={state.scan.status === 'dirty' ? 'stale' : 'synced'} />
+          <Telemetry label="Visible" value={String(enriched.length)} sub={`${fetched.length} fetched`} />
+          <Telemetry label="UTC" value={clock.toISOString().slice(11, 19)} />
+        </div>
+        <div className={`status-pill tone-${statusTone}`}>
+          <i className="status-dot" aria-hidden="true" />
+          <strong role="status">{statusLabel}</strong>
+          <small>{MODE_LABEL[state.mode]}</small>
+        </div>
+      </header>
+
+      <aside className={`contacts panel glass ${mobilePanel === 'contacts' ? 'sheet-active' : ''}`} aria-label="Contacts">
+        <div className="panel-head">
+          <h2><List size={15} aria-hidden="true" />Contacts</h2>
+          <span className="count-chip contacts-count">{registerFilter.trim() ? `${registerFeatures.length} / ${enriched.length}` : enriched.length}</span>
+          <button className="icon-button sheet-close" aria-label="Close contacts" onClick={() => setMobilePanel('none')}><X size={16} /></button>
+        </div>
+        <label className="filter-field">
+          <Filter size={14} aria-hidden="true" />
+          <input type="search" aria-label="Filter contact register" placeholder="Filter by name, route, operator…" value={registerFilter} onChange={event => setRegisterFilter(event.target.value)} />
+        </label>
+        <VirtualContactList features={registerFeatures} selectedId={state.selectionId} onSelect={id => dispatch({ type: 'SELECT', id })} />
       </aside>
 
-      <section className={`system-log panel ${mobilePanel === 'log' ? 'mobile-open' : ''}`}>
-        <div className="panel-title"><span>SYSTEM LOG</span><small>{state.logs.length} EVENTS</small><button className="mobile-close" aria-label="Close system log" onClick={() => setMobilePanel('none')}>×</button></div>
-        <div className="log-lines">{state.logs.map(entry => <div key={entry.id} className={`log-${entry.level}`}><span>{new Date(entry.timestamp).toISOString().slice(11, 19)}</span><b>{entry.channel.padEnd(8, ' ')}</b>{entry.message}</div>)}</div>
-      </section>
+      <aside className={`side panel glass ${mobilePanel === 'side' ? 'sheet-active' : ''}`} aria-label="Analysis">
+        <div className="panel-head">
+          <div className="tabs" role="tablist" aria-label="Analysis panels">
+            {SIDE_TABS.map(tab => (
+              <button
+                key={tab.key}
+                role="tab"
+                id={`tab-${tab.key}`}
+                aria-selected={sideTab === tab.key}
+                aria-controls="side-body"
+                className="tab"
+                onClick={() => setSideTab(tab.key)}
+              >
+                <tab.icon size={14} aria-hidden="true" />{tab.label}
+              </button>
+            ))}
+          </div>
+          <button className="icon-button sheet-close" aria-label="Close panel" onClick={() => setMobilePanel('none')}><X size={16} /></button>
+        </div>
+        <div className="side-body" id="side-body" role="tabpanel" aria-labelledby={`tab-${sideTab}`}>
+          {sideTab === 'overview' && (
+            <div className="stack">
+              <div className="stat-grid">
+                <StatTile icon={Eye} label="Visible" value={String(enriched.length)} sub={`${fetched.length} fetched`} />
+                <StatTile icon={Target} label="Nearest" value={nearest ? formatRange(nearest.distance) : '—'} sub={nearest ? MARKER_BY_KEY[markerKey(nearest)].label : 'No camera in view'} />
+              </div>
+              {osmChanges && (
+                <section className="card stat-card newly-mapped">
+                  <h3 className="eyebrow">Newly mapped · OSM</h3>
+                  <strong>+{osmChanges.addedCount}</strong>
+                  <small>{osmChanges.removedCount} removed · {osmChanges.since?.slice(0, 10) ?? '—'} → {osmChanges.until?.slice(0, 10) ?? '—'}</small>
+                  {osmChanges.feed && <a className="text-link" href={new URL(`osm/${osmChanges.feed}`, STATIC_API_BASE).href}><Rss size={13} aria-hidden="true" />Atom feed</a>}
+                </section>
+              )}
+              <section className="card">
+                <h3 className="eyebrow">Classification</h3>
+                <div className="class-list">
+                  {MARKER_CLASSES.map(marker => (
+                    <div className="class-row" key={marker.key}>
+                      <MarkerSwatch marker={marker} />
+                      <span className="class-label">{marker.label}</span>
+                      <span className="class-value">{classCounts[marker.key]}</span>
+                      <span className="class-bar" aria-hidden="true">
+                        <i style={{ width: `${visible.length ? (classCounts[marker.key] / visible.length) * 100 : 0}%`, background: marker.color }} />
+                      </span>
+                    </div>
+                  ))}
+                </div>
+                <p className="muted-note">{facingCount} with a published viewing direction</p>
+              </section>
+            </div>
+          )}
+          {sideTab === 'layers' && (
+            <LayerPanel
+              layers={state.layers}
+              autoScan={state.autoScan}
+              onToggle={toggleLayer}
+              onAutoScan={value => { dispatch({ type: 'AUTO_SCAN_SET', value }); addLog('SCAN', `AUTO SCAN ${value ? 'ENABLED' : 'DISABLED'}`); }}
+            />
+          )}
+          {sideTab === 'sources' && (
+            <div className="stack">
+              <section className="card">
+                <h3 className="eyebrow">Providers</h3>
+                {ravenProviders.map(provider => <SourceRow key={provider.id} name={provider.name} run={state.providers[provider.id]} />)}
+              </section>
+              <section className="card">
+                <h3 className="eyebrow">Data &amp; attribution</h3>
+                <p className="muted-note">Public and open data only. © OpenStreetMap contributors (ODbL) · OpenFreeMap · FL511 / Florida DOT · Caltrans.</p>
+                <a className="text-link" href={new URL('index.json', STATIC_API_BASE).href} target="_blank" rel="noreferrer"><ExternalLink size={13} aria-hidden="true" />Public camera API</a>
+              </section>
+            </div>
+          )}
+          {sideTab === 'log' && <LogView logs={state.logs} />}
+        </div>
+      </aside>
 
-      <footer className="command-bar panel">
-        <button className="command primary" disabled={state.mode === 'detecting' || state.scan.status === 'scanning'} onClick={() => void runScan('manual')}>SCAN VIEW</button>
-        <button className="command" onClick={setGpsOrigin}>GPS ORIGIN</button>
-        <button className="command" onClick={setScanOrigin}>SCAN ORIGIN</button>
-        <button className={`command ${state.autoScan ? 'on' : ''}`} aria-pressed={state.autoScan} onClick={() => dispatch({ type: 'AUTO_SCAN_SET', value: !state.autoScan })}>AUTO SCAN</button>
-        <button className="command" onClick={() => void clearCache()}>CLEAR CACHE</button>
-        <div className="scan-readout"><span>SCAN MODEL</span><strong>VISIBLE BOUNDS · SAFE TILES · z{state.viewport.zoom.toFixed(1)}</strong></div>
-        <div className="command-note">PUBLIC / OPEN DATA ONLY · © OPENSTREETMAP CONTRIBUTORS · FL511 / FDOT · CALTRANS</div>
-      </footer>
+      <div className="legend glass" aria-label="Map legend">
+        {MARKER_CLASSES.map(marker => (
+          <span key={marker.key} className={`legend-item ${state.layers[marker.layer] ? '' : 'is-off'}`}><MarkerSwatch marker={marker} />{marker.label}</span>
+        ))}
+      </div>
 
-      <nav className="mobile-toolbar" aria-label="Raven mobile panels">
-        <button onClick={() => setMobilePanel('contacts')}>CONTACTS</button>
-        <button onClick={() => setMobilePanel('layers')}>LAYERS</button>
-        <button onClick={() => setMobilePanel('log')}>LOG</button>
-        <button onClick={() => void runScan('manual')}>SCAN</button>
+      {state.scan.status === 'dirty' && (
+        <div className="toast glass">
+          <RefreshCw size={15} aria-hidden="true" />
+          <span>Map moved — results are from the previous scan</span>
+          <button onClick={() => void runScan('manual')}>Rescan</button>
+        </div>
+      )}
+
+      {selected && selectedClass && (
+        <section className="detail-card glass" aria-label="Contact detail">
+          <header className="detail-head">
+            <MarkerSwatch marker={selectedClass} size={18} />
+            <div className="detail-title">
+              <small className="eyebrow">{selectedClass.label}</small>
+              <strong className="detail-name">{selected.name || 'Camera'}</strong>
+            </div>
+            <button className="icon-button" aria-label="Close contact detail" onClick={() => dispatch({ type: 'SELECT', id: null })}><X size={16} /></button>
+          </header>
+          <div className="detail-scroll">
+            <CameraViewer key={selected.id} feature={selected} />
+            <dl className="facts">
+              <Fact label="Range" value={formatRange(selected.distance)} />
+              <Fact label="Azimuth" value={`${Math.round(selected.azimuth)}°`} />
+              <Fact label="Facing" value={selected.directionLabel || (selected.bearing === undefined ? 'Unknown' : `${selected.bearing}°`)} />
+              <Fact label="Type" value={selected.cameraType && selected.cameraType !== 'unknown' ? selected.cameraType.toUpperCase() : '—'} />
+              <Fact label="Operator" value={selected.operator || 'Unspecified'} />
+              {selected.manufacturer && <Fact label="Manufacturer" value={selected.manufacturer} />}
+              <Fact label="Provider" value={providerById(selected.providerId)?.name || selected.providerId} />
+              <Fact label="Coordinates" value={`${selected.lat.toFixed(6)}, ${selected.lon.toFixed(6)}`} wide mono />
+              {selected.sourceUpdatedAt && <Fact label="Source update" value={selected.sourceUpdatedAt} wide mono />}
+            </dl>
+            <div className="detail-actions">
+              {selected.sourceUrl && <a className="action-link" href={selected.sourceUrl} target="_blank" rel="noreferrer"><ExternalLink size={14} aria-hidden="true" />Open public source</a>}
+              {selectedEditUrl && <a className="action-link" href={selectedEditUrl} target="_blank" rel="noreferrer"><PencilLine size={14} aria-hidden="true" />Edit on OpenStreetMap</a>}
+            </div>
+            <details className="raw-details"><summary>Raw provider metadata</summary><pre>{JSON.stringify(selected.metadata, null, 2)}</pre></details>
+            <div className="detail-source">{selected.attribution || selected.providerId}</div>
+          </div>
+        </section>
+      )}
+
+      <nav className="dock glass" aria-label="Actions">
+        <button className="dock-button primary" aria-label="Scan view" disabled={!canScan} onClick={() => void runScan('manual')}><Radar size={17} aria-hidden="true" /><span>Scan view</span></button>
+        <span className="dock-divider" aria-hidden="true" />
+        <button className="dock-button" aria-label="GPS origin" title="Measure ranges from your location" onClick={setGpsOrigin}><LocateFixed size={17} aria-hidden="true" /><span>GPS origin</span></button>
+        <button className="dock-button" aria-label="Scan origin" title="Measure ranges from the scan centre" onClick={setScanOrigin}><Crosshair size={17} aria-hidden="true" /><span>Scan origin</span></button>
+        <button className={`dock-button ${state.autoScan ? 'is-on' : ''}`} aria-label="Auto scan" aria-pressed={state.autoScan} title="Rescan shortly after the map stops moving" onClick={() => dispatch({ type: 'AUTO_SCAN_SET', value: !state.autoScan })}><RefreshCw size={17} aria-hidden="true" /><span>Auto scan</span></button>
+        <span className="dock-divider" aria-hidden="true" />
+        <button className="dock-button" aria-label="Export GeoJSON" title="Download the visible cameras as GeoJSON" disabled={visible.length === 0} onClick={exportView}><Download size={17} aria-hidden="true" /><span>Export</span></button>
+        <a className="dock-button" aria-label="Add camera to OSM" href={osmAddUrl(state.viewport.center)} target="_blank" rel="noreferrer" title="Map a missing camera in OpenStreetMap at the map centre"><MapPinPlus size={17} aria-hidden="true" /><span>Add camera</span></a>
+        <button className="dock-button" aria-label="Clear cache" title="Clear the browser provider cache" onClick={() => void clearCache()}><Trash2 size={17} aria-hidden="true" /><span>Clear cache</span></button>
+      </nav>
+
+      <nav className="mobile-tabs" aria-label="Raven panels">
+        <button className={mobilePanel === 'contacts' ? 'is-active' : ''} onClick={() => setMobilePanel(mobilePanel === 'contacts' ? 'none' : 'contacts')}><List size={18} aria-hidden="true" />Contacts</button>
+        {SIDE_TABS.map(tab => (
+          <button key={tab.key} className={mobilePanel === 'side' && sideTab === tab.key ? 'is-active' : ''} onClick={() => (mobilePanel === 'side' && sideTab === tab.key ? setMobilePanel('none') : openSide(tab.key))}>
+            <tab.icon size={18} aria-hidden="true" />{tab.label}
+          </button>
+        ))}
       </nav>
     </div>
   );
 }
 
-function HudMetric({ label, value, sub }: { label: string; value: string; sub?: string }) {
-  return <div className="hud-metric"><span>{label}</span><strong>{value}</strong>{sub && <small>{sub}</small>}</div>;
+type SideTab = 'overview' | 'layers' | 'sources' | 'log';
+
+const SIDE_TABS: Array<{ key: SideTab; label: string; icon: ComponentType<{ size?: number; 'aria-hidden'?: boolean | 'true' }> }> = [
+  { key: 'overview', label: 'Overview', icon: Activity },
+  { key: 'layers', label: 'Layers', icon: Layers },
+  { key: 'sources', label: 'Sources', icon: Database },
+  { key: 'log', label: 'Log', icon: TerminalSquare }
+];
+
+const ACTIVITY_LABEL: Record<string, string> = { SCANNING: 'Scanning…', SEARCHING: 'Searching…', LOCATING: 'Locating…' };
+const SCAN_STATUS_LABEL = {
+  idle: 'Ready to scan',
+  dirty: 'Results stale',
+  scanning: 'Scanning…',
+  partial: 'Partial results',
+  ready: 'Ready',
+  error: 'Source error'
+} as const;
+const MODE_LABEL: Record<RavenMode, string> = { detecting: 'Detecting', static: 'Web', local: 'Local' };
+
+function Telemetry({ label, value, sub }: { label: string; value: string; sub?: string }) {
+  return <div className="telemetry-item"><span>{label}</span><strong>{value}</strong>{sub && <small>{sub}</small>}</div>;
 }
-function MetricCard({ label, value, sub }: { label: string; value: string; sub: string }) {
-  return <section className="analytics-card metric-card"><div className="section-label">{label}</div><strong>{value}</strong><small>{sub}</small></section>;
+
+function StatTile({ icon: Icon, label, value, sub }: { icon: ComponentType<{ size?: number; 'aria-hidden'?: boolean | 'true' }>; label: string; value: string; sub: string }) {
+  return (
+    <section className="card stat-tile">
+      <h3 className="eyebrow"><Icon size={13} aria-hidden="true" />{label}</h3>
+      <strong>{value}</strong>
+      <small>{sub}</small>
+    </section>
+  );
 }
-function ClassCount({ label, value }: { label: string; value: number }) {
-  return <div className="class-count"><span>{label}</span><strong>{value}</strong></div>;
+
+function Fact({ label, value, wide, mono }: { label: string; value: string; wide?: boolean; mono?: boolean }) {
+  return <div className={`fact ${wide ? 'is-wide' : ''}`}><dt>{label}</dt><dd className={mono ? 'mono' : ''}>{value}</dd></div>;
+}
+
+function SourceRow({ name, run }: { name: string; run?: ProviderRun }) {
+  const status = run?.status || 'idle';
+  const progress = run?.progress ? `${run.progress.completed}/${run.progress.total}` : '';
+  const detail = run?.error || run?.warning || run?.skipReason;
+  return (
+    <div className={`source-row status-${status}`}>
+      <i className="status-dot" aria-hidden="true" />
+      <div className="source-text">
+        <strong>{name}</strong>
+        {detail && <small className={run?.error ? 'is-error' : run?.warning ? 'is-warning' : ''}>{detail}</small>}
+      </div>
+      <span className="chip">{status}{run?.features.length ? ` · ${run.features.length}` : ''}{progress ? ` · ${progress}` : ''}{run?.fromCache ? ' · cache' : ''}</span>
+    </div>
+  );
+}
+
+function LogView({ logs }: { logs: RavenLogEntry[] }) {
+  return (
+    <div className="log-view">
+      <div className="log-meta">{logs.length} events</div>
+      <div className="log-lines">
+        {logs.map(entry => (
+          <div key={entry.id} className={`log-line log-${entry.level}`}>
+            <time>{new Date(entry.timestamp).toISOString().slice(11, 19)}</time>
+            <b>{entry.channel}</b>
+            <span>{entry.message}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 }

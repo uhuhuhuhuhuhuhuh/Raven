@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { osmProvider } from './osm';
-import { boundsCovered, coverageContains, parseTileIndex, tileKeysFor, type OsmTileIndex } from './osmTiles';
+import { boundsCovered, coverageContains, loadOsmChanges, parseTileIndex, tileKeysFor, type OsmTileIndex } from './osmTiles';
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -109,5 +109,26 @@ describe('OSM provider with published extract tiles', () => {
     }));
     await osmProvider.scan({ mode: 'static', bounds: miami, zoom: 13, staticApiBase: 'https://raven.test/c/api/v1/' }, new AbortController().signal);
     expect(requested.some(url => url.includes('overpass-api.de'))).toBe(true);
+  });
+});
+
+describe('weekly OSM changes', () => {
+  const changes = {
+    version: 1, baseline: false, since: '2026-09-15T20:00:00Z', until: '2026-09-22T20:21:02Z', addedCount: 1, removedCount: 2,
+    added: [[5, 27.95, -82.46, { man_made: 'surveillance' }]], removed: [], feed: 'changes.atom'
+  };
+
+  it('loads published changes and ignores baselines, missing files and unknown versions', async () => {
+    const respond = vi.fn();
+    vi.stubGlobal('fetch', respond);
+    respond.mockResolvedValueOnce(json(changes));
+    expect(await loadOsmChanges('https://raven.test/api/v1/')).toMatchObject({ addedCount: 1, removedCount: 2, feed: 'changes.atom' });
+    expect(String(respond.mock.calls[0][0])).toBe('https://raven.test/api/v1/osm/changes.json');
+    respond.mockResolvedValueOnce(json({ ...changes, baseline: true, added: [] }));
+    expect(await loadOsmChanges('https://raven.test/api/v1/')).toBeNull();
+    respond.mockResolvedValueOnce(new Response('missing', { status: 404 }));
+    expect(await loadOsmChanges('https://raven.test/api/v1/')).toBeNull();
+    respond.mockResolvedValueOnce(json({ ...changes, version: 2 }));
+    expect(await loadOsmChanges('https://raven.test/api/v1/')).toBeNull();
   });
 });
