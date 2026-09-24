@@ -374,6 +374,7 @@ export default function App() {
           focus={focus}
           onViewportChange={handleViewport}
           onSelect={id => dispatch({ type: 'SELECT', id })}
+          onBasemap={source => addLog('MAP', source === 'openfreemap' ? 'BASEMAP · OPENFREEMAP VECTOR' : 'BASEMAP UNAVAILABLE · OSM RASTER FALLBACK', source === 'openfreemap' ? 'info' : 'warn')}
         />
         <div className="map-grid-overlay" />
         <div className="origin-reticle" aria-hidden="true"><span /><span /></div>
@@ -450,7 +451,7 @@ export default function App() {
         <button className={`command ${state.autoScan ? 'on' : ''}`} aria-pressed={state.autoScan} onClick={() => dispatch({ type: 'AUTO_SCAN_SET', value: !state.autoScan })}>AUTO SCAN</button>
         <button className="command" onClick={() => void clearCache()}>CLEAR CACHE</button>
         <div className="scan-readout"><span>SCAN MODEL</span><strong>VISIBLE BOUNDS · SAFE TILES · z{state.viewport.zoom.toFixed(1)}</strong></div>
-        <div className="command-note">PUBLIC / OPEN DATA ONLY · © OPENSTREETMAP CONTRIBUTORS · FL511 / FDOT · CALTRANS</div>
+        <div className="command-note">PUBLIC / OPEN DATA ONLY · © OPENSTREETMAP CONTRIBUTORS · OPENFREEMAP · FL511 / FDOT · CALTRANS</div>
       </footer>
 
       <nav className="mobile-toolbar" aria-label="Raven mobile panels">

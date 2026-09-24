@@ -2,6 +2,13 @@ import { expect, test, type Page } from '@playwright/test';
 
 const transparentPng = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64');
 
+const basemapStyle = {
+  version: 8,
+  glyphs: 'https://tiles.openfreemap.org/fonts/{fontstack}/{range}.pbf',
+  sources: {},
+  layers: [{ id: 'background', type: 'background', paint: { 'background-color': '#0c0c0c' } }]
+};
+
 function isMobile(page: Page) {
   return (page.viewportSize()?.width || 1000) <= 900;
 }
@@ -12,6 +19,9 @@ test.beforeEach(async ({ page }) => {
   await page.route('**/api/v1/osm/index.json', route => route.fulfill({ status: 404, body: '' }));
   await page.route('https://tile.openstreetmap.org/**', route => route.fulfill({ status: 200, contentType: 'image/png', body: transparentPng }));
   await page.route('https://fonts.openmaptiles.org/**', route => route.fulfill({ status: 200, contentType: 'application/x-protobuf', body: Buffer.alloc(0) }));
+  // A minimal stand-in for the OpenFreeMap style keeps the suite offline and deterministic.
+  await page.route('https://tiles.openfreemap.org/**', route => route.fulfill({ status: 200, contentType: 'application/x-protobuf', body: Buffer.alloc(0) }));
+  await page.route('https://tiles.openfreemap.org/styles/dark', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(basemapStyle) }));
 });
 
 test('snapshot layers hide and restore without destructive data loss', async ({ page }) => {
