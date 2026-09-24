@@ -35,3 +35,4 @@
 @media (max-width: 900px) {
   .debug-details pre { max-height: 180px; }
 }
+button.stream-link { width: 100%; text-align: left; background: transparent; border: 0; border-top: 1px solid var(--line); cursor: pointer; font-family: inherit; }

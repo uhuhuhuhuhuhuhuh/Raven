@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { isHlsUrl } from './components/LiveVideo';
 import { fetchWithRetry, retryDelayMs, sleep } from './net';
 
 afterEach(() => vi.unstubAllGlobals());
@@ -44,5 +45,14 @@ describe('polite network retry', () => {
     controller.abort();
     await expect(waiting).rejects.toMatchObject({ name: 'AbortError' });
     await expect(sleep(10, controller.signal)).rejects.toMatchObject({ name: 'AbortError' });
+  });
+});
+
+describe('stream URL classification', () => {
+  it('recognises HLS playlists, including ones with query strings', () => {
+    expect(isHlsUrl('https://wzmedia.dot.ca.gov/D3/cam.stream/playlist.m3u8')).toBe(true);
+    expect(isHlsUrl('https://example.test/live.M3U8?token=public')).toBe(true);
+    expect(isHlsUrl('https://example.test/clip.mp4')).toBe(false);
+    expect(isHlsUrl('https://cwwp2.dot.ca.gov/vm/loc/d7/viewer.htm')).toBe(false);
   });
 });

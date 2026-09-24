@@ -196,4 +196,26 @@ describe('camera providers', () => {
     expect(result.features).toHaveLength(20);
     expect(result.warning).toContain('RESULT LIMIT REACHED');
   });
+
+  it('treats a Caltrans-published HLS playlist as an in-app live stream, not a viewer page', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      features: [{
+        geometry: { x: -121.5, y: 38.5 },
+        attributes: {
+          OBJECTID: 7,
+          locationName: 'I-5 : Pocket Rd',
+          inService: 'true',
+          streamingVideoURL: 'https://wzmedia.dot.ca.gov/D3/5_Pocket_Rd_OC_SAC5_SB.stream/playlist.m3u8',
+          currentImageURL: 'https://example.test/pocket.jpg'
+        }
+      }],
+      exceededTransferLimit: false
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+
+    const [camera] = (await caltransProvider.scan({ mode: 'static', bounds: californiaBounds, zoom: 13 }, new AbortController().signal)).features;
+    expect(camera.mediaType).toBe('stream');
+    expect(camera.streamUrl).toBe('https://wzmedia.dot.ca.gov/D3/5_Pocket_Rd_OC_SAC5_SB.stream/playlist.m3u8');
+    expect(camera.streamPageUrl).toBeUndefined();
+    expect(camera.snapshotUrl).toBe('https://example.test/pocket.jpg');
+  });
 });

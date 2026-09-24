@@ -220,3 +220,43 @@ test('renders field-of-view wedges and range rings without map style errors', as
   await page.waitForTimeout(500);
   expect(errors).toEqual([]);
 });
+
+test('plays a provider-published HLS stream in-app and falls back to the snapshot when it fails', async ({ page }) => {
+  const playlist = 'https://wzmedia.dot.ca.gov/D7/TEST_CAMERA.stream/playlist.m3u8';
+  let playlistRequests = 0;
+  await routeCameras(page, []);
+  await page.route('**/CHhighway/CCTV/FeatureServer/0/query*', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      features: [{
+        geometry: { x: -118.25, y: 34.05 },
+        attributes: { OBJECTID: 42, locationName: 'US-101 Live Test', inService: 'true', streamingVideoURL: playlist, currentImageURL: 'https://example.test/caltrans.jpg' }
+      }],
+      exceededTransferLimit: false
+    })
+  }));
+  await page.route('https://example.test/**', route => route.fulfill({ status: 200, contentType: 'image/png', body: transparentPng }));
+  // An unplayable stream: this proves hls.js requests the published playlist and that failure degrades cleanly.
+  await page.route(playlist, route => {
+    playlistRequests += 1;
+    return route.fulfill({ status: 404, body: 'gone' });
+  });
+
+  await page.goto('/#map=14.00/34.05000/-118.25000');
+  await page.getByRole('button', { name: 'SCAN VIEW' }).click();
+  await openPanel(page, 'CONTACTS');
+  await page.getByRole('button', { name: /US-101 Live Test/ }).click();
+  if (isMobile(page)) await page.keyboard.press('Escape');
+
+  const detail = page.locator('.detail-card');
+  await expect(detail.getByText('PUBLIC HLS STREAM')).toBeVisible();
+  await expect(detail.getByText('● STREAM UNAVAILABLE')).toBeVisible();
+  expect(playlistRequests).toBeGreaterThan(0);
+  await expect(detail.getByRole('img', { name: /Public traffic camera snapshot/ })).toBeVisible();
+
+  const before = playlistRequests;
+  await detail.getByRole('button', { name: 'RETRY LIVE STREAM' }).click();
+  await expect(detail.getByText('● STREAM UNAVAILABLE')).toBeVisible();
+  expect(playlistRequests).toBeGreaterThan(before);
+});

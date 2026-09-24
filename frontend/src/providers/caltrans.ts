@@ -6,9 +6,10 @@ import { clipBounds, type RavenProvider } from './types';
 const CALTRANS_CCTV = 'https://caltrans-gis.dot.ca.gov/arcgis/rest/services/CHhighway/CCTV/FeatureServer/0/query';
 const CALIFORNIA_BOUNDS = { west: -124.6, south: 32.3, east: -114.0, north: 42.2 };
 
+/** A media resource the browser can play in-app: progressive video or an HLS playlist. */
 function directVideoUrl(value?: string): string | undefined {
   if (!value) return undefined;
-  return /\.(?:mp4|webm|ogg|ogv)(?:[?#].*)?$/i.test(value) ? value : undefined;
+  return /\.(?:mp4|webm|ogg|ogv|m3u8)(?:[?#].*)?$/i.test(value) ? value : undefined;
 }
 
 function recordTimestamp(attributes: Record<string, any>): string | undefined {
