@@ -85,7 +85,9 @@ jobs:
           fi
       - name: Build static camera/stream API
         working-directory: frontend
-        run: npm run build:api
+        timeout-minutes: 10
+        # --check-streams marks which published live streams answered (a few minutes daily).
+        run: npm run build:api -- dist/api/v1 --check-streams
       - uses: actions/upload-pages-artifact@v3
         with:
           path: frontend/dist

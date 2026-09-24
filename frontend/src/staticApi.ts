@@ -1,4 +1,5 @@
 import { isHlsUrl } from './providers/normalize';
+import type { StreamHealth } from './streamHealth';
 import type { RavenFeature } from './types';
 
 /**
@@ -7,7 +8,7 @@ import type { RavenFeature } from './types';
  */
 export const API_VERSION = 1;
 
-export type ApiStream = { url: string; format: 'hls' | 'progressive' };
+export type ApiStream = { url: string; format: 'hls' | 'progressive'; /** Answered at the last health check (see streams.json healthCheckedAt). */ online?: boolean };
 
 export type ApiCamera = {
   id: string;
@@ -71,10 +72,20 @@ export function camerasGeoJson(cameras: ApiCamera[], generatedAt: string) {
 }
 
 /** Maps output file names (relative to api/v1/) to their JSON documents. */
-export function buildStaticApi(results: ProviderCatalogResult[], generatedAt: string, extraEndpoints: Record<string, string> = {}) {
+export function buildStaticApi(
+  results: ProviderCatalogResult[],
+  generatedAt: string,
+  extraEndpoints: Record<string, string> = {},
+  health?: StreamHealth
+) {
   const cameras = results
     .flatMap(result => (result.features || []).map(toApiCamera))
     .sort((a, b) => a.id.localeCompare(b.id));
+  if (health) {
+    for (const camera of cameras) {
+      if (camera.stream && health.online.has(camera.id)) camera.stream.online = health.online.get(camera.id);
+    }
+  }
   const streams = cameras.filter(camera => camera.stream);
   return {
     'index.json': {
@@ -96,12 +107,13 @@ export function buildStaticApi(results: ProviderCatalogResult[], generatedAt: st
         status: result.error ? 'error' : result.warning ? 'partial' : 'ok',
         cameras: cameras.filter(camera => camera.provider === result.id).length,
         streams: streams.filter(camera => camera.provider === result.id).length,
+        ...(health ? { streamsOnline: streams.filter(camera => camera.provider === result.id && camera.stream?.online).length } : {}),
         ...(result.warning ? { warning: result.warning } : {}),
         ...(result.error ? { error: result.error } : {})
       }))
     },
     'cameras.json': { version: API_VERSION, generatedAt, count: cameras.length, cameras },
-    'streams.json': { version: API_VERSION, generatedAt, count: streams.length, streams },
+    'streams.json': { version: API_VERSION, generatedAt, ...(health ? { healthCheckedAt: health.checkedAt } : {}), count: streams.length, streams },
     'cameras.geojson': camerasGeoJson(cameras, generatedAt),
     'streams.geojson': camerasGeoJson(streams, generatedAt)
   };
