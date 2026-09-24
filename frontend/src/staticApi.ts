@@ -56,6 +56,20 @@ export function toApiCamera(feature: RavenFeature): ApiCamera {
   };
 }
 
+/** GeoJSON FeatureCollection of API records, for GIS tools such as QGIS or uMap. */
+export function camerasGeoJson(cameras: ApiCamera[], generatedAt: string) {
+  return {
+    type: 'FeatureCollection' as const,
+    generatedAt,
+    features: cameras.map(({ lat, lon, id, ...properties }) => ({
+      type: 'Feature' as const,
+      id,
+      geometry: { type: 'Point' as const, coordinates: [lon, lat] },
+      properties: { id, ...properties }
+    }))
+  };
+}
+
 /** Maps output file names (relative to api/v1/) to their JSON documents. */
 export function buildStaticApi(results: ProviderCatalogResult[], generatedAt: string, extraEndpoints: Record<string, string> = {}) {
   const cameras = results
@@ -68,7 +82,13 @@ export function buildStaticApi(results: ProviderCatalogResult[], generatedAt: st
       version: API_VERSION,
       generatedAt,
       notice: 'Public/open data only. Each record carries its source attribution; media URLs are exactly as the agency publishes them.',
-      endpoints: { cameras: 'cameras.json', streams: 'streams.json', ...extraEndpoints },
+      endpoints: {
+        cameras: 'cameras.json',
+        streams: 'streams.json',
+        camerasGeoJson: 'cameras.geojson',
+        streamsGeoJson: 'streams.geojson',
+        ...extraEndpoints
+      },
       providers: results.map(result => ({
         id: result.id,
         name: result.name,
@@ -81,6 +101,8 @@ export function buildStaticApi(results: ProviderCatalogResult[], generatedAt: st
       }))
     },
     'cameras.json': { version: API_VERSION, generatedAt, count: cameras.length, cameras },
-    'streams.json': { version: API_VERSION, generatedAt, count: streams.length, streams }
+    'streams.json': { version: API_VERSION, generatedAt, count: streams.length, streams },
+    'cameras.geojson': camerasGeoJson(cameras, generatedAt),
+    'streams.geojson': camerasGeoJson(streams, generatedAt)
   };
 }

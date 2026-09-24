@@ -33,7 +33,15 @@ describe('static camera API', () => {
 
     expect(files['cameras.json'].cameras.map(camera => camera.id)).toEqual(['caltrans-1', 'caltrans-2', 'fl511-9']);
     expect(files['streams.json']).toMatchObject({ count: 1, streams: [{ id: 'caltrans-2' }] });
-    expect(files['index.json'].endpoints).toEqual({ cameras: 'cameras.json', streams: 'streams.json', osmTiles: 'osm/index.json' });
+    expect(files['index.json'].endpoints).toEqual({
+      cameras: 'cameras.json', streams: 'streams.json', camerasGeoJson: 'cameras.geojson', streamsGeoJson: 'streams.geojson', osmTiles: 'osm/index.json'
+    });
+    expect(files['streams.geojson'].features).toEqual([{
+      type: 'Feature', id: 'caltrans-2',
+      geometry: { type: 'Point', coordinates: [-121.90489, 37.561661] },
+      properties: expect.objectContaining({ id: 'caltrans-2', provider: 'caltrans-cctv', stream: { url: hls.streamUrl, format: 'hls' } })
+    }]);
+    expect(files['cameras.geojson'].features).toHaveLength(3);
     expect(files['index.json'].providers).toEqual([
       { id: 'fl511-public-cameras', name: 'FL511', attribution: 'FL511', status: 'ok', cameras: 1, streams: 0 },
       { id: 'caltrans-cctv', name: 'Caltrans', attribution: 'Caltrans', status: 'partial', cameras: 2, streams: 1, warning: 'PAGE 2 FAILED' },

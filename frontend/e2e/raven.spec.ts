@@ -320,3 +320,25 @@ test('shows cameras newly mapped since the last weekly extract', async ({ page }
   await expect(card.getByRole('link', { name: 'ATOM FEED ↗' })).toHaveAttribute('href', /\/api\/v1\/osm\/changes\.atom$/);
   await expect(page.getByRole('button', { name: /NEWLY MAPPED/ })).toHaveAttribute('aria-pressed', 'true');
 });
+
+test('exports the visible cameras as GeoJSON and links OSM records to the editor', async ({ page }) => {
+  await routeCameras(page, [
+    { type: 'node', id: 77, lat: 25.765, lon: -80.190, tags: { man_made: 'surveillance', 'surveillance:type': 'ALPR', name: 'Export Plate Reader' } }
+  ]);
+  await page.goto('/');
+  await page.getByRole('button', { name: 'SCAN VIEW' }).click();
+  await expect(page.locator('.system-block strong')).toHaveText(/READY/);
+
+  const [download] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: 'EXPORT GEOJSON' }).click()]);
+  expect(download.suggestedFilename()).toMatch(/^raven-cameras-\d{4}-\d{2}-\d{2}\.geojson$/);
+  const collection = JSON.parse(await (await download.createReadStream()).toArray().then(chunks => Buffer.concat(chunks).toString('utf8')));
+  expect(collection.type).toBe('FeatureCollection');
+  expect(collection.attribution).toContain('© OpenStreetMap contributors');
+  expect(collection.features).toEqual([expect.objectContaining({ id: 'osm-node-77', geometry: { type: 'Point', coordinates: [-80.19, 25.765] } })]);
+
+  await expect(page.getByRole('link', { name: 'ADD CAMERA TO OSM ↗' })).toHaveAttribute('href', /openstreetmap\.org\/edit#map=19\//);
+  await openPanel(page, 'CONTACTS');
+  await page.getByRole('button', { name: /Export Plate Reader/ }).click();
+  if (isMobile(page)) await page.keyboard.press('Escape');
+  await expect(page.getByRole('link', { name: 'EDIT ON OPENSTREETMAP ↗' })).toHaveAttribute('href', 'https://www.openstreetmap.org/edit?node=77');
+});

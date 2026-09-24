@@ -4,10 +4,12 @@ import { CameraViewer } from './components/CameraViewer';
 import { LayerPanel } from './components/LayerPanel';
 import { RavenMap, type MapFocus } from './components/RavenMap';
 import { VirtualContactList, type EnrichedFeature } from './components/VirtualContactList';
+import { downloadGeoJson, featuresToGeoJson } from './exportGeoJson';
 import { matchesFilter } from './filter';
 import { bearingDegrees, distanceMeters, formatRange } from './geo';
 import { classLabel } from './labels';
 import { abortError } from './net';
+import { osmAddUrl, osmEditUrl } from './osmLinks';
 import { formatViewHash, parseViewHash } from './permalink';
 import { loadPreferences, savePreferences } from './preferences';
 import { loadOsmChanges, type OsmChanges } from './providers/osmTiles';
@@ -332,6 +334,12 @@ export default function App() {
     addLog('LAYER', `${layer.toUpperCase()} TOGGLED`);
   }
 
+  function exportView() {
+    const stamp = new Date().toISOString();
+    downloadGeoJson(`raven-cameras-${stamp.slice(0, 10)}.geojson`, featuresToGeoJson(visible, stamp));
+    addLog('EXPORT', `${visible.length} VISIBLE CONTACTS EXPORTED AS GEOJSON`);
+  }
+
   async function clearCache() {
     await clearProviderCache();
     addLog('CACHE', 'BROWSER PROVIDER CACHE CLEARED');
@@ -415,6 +423,7 @@ export default function App() {
             <details className="debug-details"><summary>PROVIDER / RAW METADATA</summary><pre>{JSON.stringify(selected.metadata, null, 2)}</pre></details>
             <div className="detail-source">{selected.attribution || selected.providerId}</div>
             {selected.sourceUrl && <a href={selected.sourceUrl} target="_blank" rel="noreferrer">OPEN OFFICIAL / PUBLIC SOURCE ↗</a>}
+            {osmEditUrl(selected) && <a href={osmEditUrl(selected)} target="_blank" rel="noreferrer">EDIT ON OPENSTREETMAP ↗</a>}
           </section>
         )}
       </main>
@@ -474,6 +483,8 @@ export default function App() {
         <button className="command" onClick={setScanOrigin}>SCAN ORIGIN</button>
         <button className={`command ${state.autoScan ? 'on' : ''}`} aria-pressed={state.autoScan} onClick={() => dispatch({ type: 'AUTO_SCAN_SET', value: !state.autoScan })}>AUTO SCAN</button>
         <button className="command" onClick={() => void clearCache()}>CLEAR CACHE</button>
+        <button className="command" disabled={visible.length === 0} onClick={exportView}>EXPORT GEOJSON</button>
+        <a className="command" href={osmAddUrl(state.viewport.center)} target="_blank" rel="noreferrer" title="Map a missing camera in OpenStreetMap at the map centre">ADD CAMERA TO OSM ↗</a>
         <div className="scan-readout"><span>SCAN MODEL</span><strong>VISIBLE BOUNDS · SAFE TILES · z{state.viewport.zoom.toFixed(1)}</strong></div>
         <div className="command-note">PUBLIC / OPEN DATA ONLY · © OPENSTREETMAP CONTRIBUTORS · OPENFREEMAP · FL511 / FDOT · CALTRANS</div>
       </footer>
