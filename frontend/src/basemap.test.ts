@@ -17,8 +17,8 @@ const style = {
 describe('basemap', () => {
   it('tints only the background and water to the Raven palette', () => {
     const tinted = tintStyle(style);
-    expect(tinted.layers[0]).toMatchObject({ paint: { 'background-color': '#07100d' } });
-    expect(tinted.layers[1]).toMatchObject({ paint: { 'fill-color': '#0b1a16', 'fill-antialias': false } });
+    expect(tinted.layers[0]).toMatchObject({ paint: { 'background-color': '#0a0e15' } });
+    expect(tinted.layers[1]).toMatchObject({ paint: { 'fill-color': '#0c1726', 'fill-antialias': false } });
     expect(tinted.layers[2]).toBe(style.layers[2]);
   });
 

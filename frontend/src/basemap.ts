@@ -45,13 +45,13 @@ export const FALLBACK_BASEMAP: Basemap = {
   }
 };
 
-/** Recolours the style's background and water to Raven's dark green palette. */
+/** Recolours the style's background and water to Raven's dark navy palette. */
 export function tintStyle(style: StyleSpecification): StyleSpecification {
   return {
     ...style,
     layers: style.layers.map(layer => {
-      if (layer.type === 'background') return { ...layer, paint: { ...layer.paint, 'background-color': '#07100d' } };
-      if (layer.type === 'fill' && layer.id === 'water') return { ...layer, paint: { ...layer.paint, 'fill-color': '#0b1a16' } };
+      if (layer.type === 'background') return { ...layer, paint: { ...layer.paint, 'background-color': '#0a0e15' } };
+      if (layer.type === 'fill' && layer.id === 'water') return { ...layer, paint: { ...layer.paint, 'fill-color': '#0c1726' } };
       return layer;
     })
   };

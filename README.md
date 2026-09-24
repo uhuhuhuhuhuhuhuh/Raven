@@ -119,6 +119,17 @@ Provider caching is an availability/performance optimization; failures to read o
 
 ## Map and UI
 
+The interface is a full-bleed map with floating glass panels:
+- a top bar with search, telemetry and scan status;
+- a Contacts panel;
+- a tabbed side panel (Overview, Layers, Sources, Log);
+- an icon dock of actions;
+- a map legend.
+
+Text uses self-hosted Inter and JetBrains Mono, so there are no third-party font requests. On phones and tablets (1100 px and below), panels become bottom sheets behind a tab bar.
+
+Camera markers encode their class twice, by hue and by shape: blue dot/ringed dot for snapshot/live stream, an orange diamond for plate readers, aqua circle/square for mapped/speed cameras. A map can put any two markers side by side, and only three hues pass colour-vision checks across every pair (validated with the dataviz palette validator), so shape carries the rest.
+
 - MapLibre map with native marker clustering on an [OpenFreeMap](https://openfreemap.org/) dark vector basemap, tinted to Raven's palette. OpenFreeMap is free, keyless and cookie-free, and built for app traffic, unlike the volunteer-run `tile.openstreetmap.org`. If it cannot be reached, the map falls back to OSM raster tiles; the system log records which basemap is in use.
 - separate unclustered heatmap source
 - exact last-scan outline

@@ -8,6 +8,8 @@ function bust(url: string): string {
   return `${url}${joiner}raven_frame=${Date.now()}`;
 }
 
+const STATUS_LABEL = { loading: 'Loading', active: 'Active', stale: 'Stale', offline: 'Offline' } as const;
+
 function sourceAge(sourceUpdatedAt?: string): number | null {
   if (!sourceUpdatedAt) return null;
   const parsed = Date.parse(sourceUpdatedAt);
@@ -15,7 +17,7 @@ function sourceAge(sourceUpdatedAt?: string): number | null {
 }
 
 function formatAge(ms: number | null): string {
-  if (ms === null) return 'UNKNOWN';
+  if (ms === null) return 'unknown';
   const seconds = Math.floor(ms / 1000);
   if (seconds < 60) return `${seconds}s`;
   const minutes = Math.floor(seconds / 60);
@@ -68,31 +70,31 @@ export function SnapshotViewer({ feature }: { feature: RavenFeature }) {
   }, [feature.snapshotUrl, feature.sourceUpdatedAt, refreshMs]);
 
   if (!feature.snapshotUrl) {
-    return <div className="media-empty">NO PUBLIC SNAPSHOT URL</div>;
+    return <div className="media-empty">No public snapshot URL</div>;
   }
 
   return (
     <section className="snapshot-viewer">
       <div className={`media-status media-${status}`}>
-        <span>● {status.toUpperCase()}</span>
-        <span>SOURCE AGE {formatAge(age)}</span>
-        <span>FAILURES {failures}</span>
+        <span className="media-state"><i className="status-dot" aria-hidden="true" />{STATUS_LABEL[status]}</span>
+        <span>Source age <b>{formatAge(age)}</b></span>
+        {failures > 0 && <span>Failures <b>{failures}</b></span>}
       </div>
       {currentSrc ? (
         <img src={currentSrc} alt={`Public traffic camera snapshot for ${feature.name || feature.sourceId || 'camera'}`} />
       ) : (
-        <div className="media-empty">LOADING PUBLIC SNAPSHOT…</div>
+        <div className="media-empty">Loading public snapshot…</div>
       )}
       <div className="snapshot-controls">
         <label>
-          <span>AUTO REFRESH</span>
+          <span>Refresh</span>
           <select value={refreshMs} onChange={event => setRefreshMs(Number(event.target.value))}>
             {REFRESH_OPTIONS.map(value => (
-              <option key={value} value={value}>{value === 0 ? 'OFF' : `${value / 1000}s`}</option>
+              <option key={value} value={value}>{value === 0 ? 'Off' : `${value / 1000}s`}</option>
             ))}
           </select>
         </label>
-        <span>FRAME {frameLoadedAt ? new Date(frameLoadedAt).toISOString().slice(11, 19) : '—'} UTC</span>
+        <span>Frame <b>{frameLoadedAt ? new Date(frameLoadedAt).toISOString().slice(11, 19) : '—'}</b> UTC</span>
       </div>
     </section>
   );
