@@ -1,6 +1,10 @@
 import { useEffect, useRef } from 'react';
 import maplibregl, { type GeoJSONSource, type Map as MapLibreMap } from 'maplibre-gl';
+import { normalizeViewport } from '../geo';
 import type { RavenBounds, RavenFeature, RavenViewport } from '../types';
+
+// Symbol layers (cluster counts) cannot render text without a glyph source.
+const GLYPHS_URL = 'https://fonts.openmaptiles.org/{fontstack}/{range}.pbf';
 
 export type MapFocus = { lat: number; lon: number; zoom: number; token: number } | null;
 
@@ -77,6 +81,7 @@ export function RavenMap({
       attributionControl: { compact: true },
       style: {
         version: 8,
+        glyphs: GLYPHS_URL,
         sources: {
           osm: {
             type: 'raster',
@@ -105,7 +110,7 @@ export function RavenMap({
     const emitViewport = () => {
       const center = map.getCenter();
       const bounds = map.getBounds();
-      onViewportRef.current({
+      onViewportRef.current(normalizeViewport({
         center: { lat: center.lat, lon: center.lng },
         bounds: {
           west: bounds.getWest(),
@@ -114,7 +119,7 @@ export function RavenMap({
           north: bounds.getNorth()
         },
         zoom: map.getZoom()
-      });
+      }));
     };
 
     map.on('load', () => {
@@ -160,7 +165,7 @@ export function RavenMap({
         type: 'symbol',
         source: 'contacts',
         filter: ['has', 'point_count'],
-        layout: { 'text-field': ['get', 'point_count_abbreviated'], 'text-size': 11 },
+        layout: { 'text-field': ['get', 'point_count_abbreviated'], 'text-font': ['Open Sans Bold'], 'text-size': 11 },
         paint: { 'text-color': '#d9ffec' }
       });
 

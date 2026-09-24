@@ -125,4 +125,75 @@ describe('camera providers', () => {
     expect(result.features[0].streamUrl).toBeUndefined();
     expect(result.features[0].operator).toBe('Caltrans');
   });
+
+  it('keeps completed OSM tiles and warns when only some tiles fail', async () => {
+    const broad = { west: -82.5, south: 24.5, east: -79.5, north: 27.5 };
+    const total = tileBounds(broad).length;
+    let call = 0;
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      call += 1;
+      if (call === 2) return new Response('bad gateway', { status: 400 });
+      return new Response(JSON.stringify({
+        elements: [{ type: 'node', id: call, lat: 25, lon: -80, tags: { man_made: 'surveillance' } }]
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }));
+
+    const result = await osmProvider.scan({ mode: 'static', bounds: broad, zoom: 8 }, new AbortController().signal);
+    expect(result.features).toHaveLength(total - 1);
+    expect(result.warning).toContain(`1/${total} TILES FAILED`);
+  });
+
+  it('still reports an OSM error when every tile fails', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('bad request', { status: 400 })));
+    await expect(osmProvider.scan({ mode: 'static', bounds: floridaBounds, zoom: 13 }, new AbortController().signal))
+      .rejects.toThrow('OpenStreetMap scan failed (400)');
+  });
+
+  it('reads the documented camera:direction tag and compass values for OSM bearings', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      elements: [
+        { type: 'node', id: 1, lat: 25.76, lon: -80.19, tags: { man_made: 'surveillance', 'camera:direction': 'SW', direction: '10' } },
+        { type: 'node', id: 2, lat: 25.77, lon: -80.18, tags: { man_made: 'surveillance', direction: '90' } }
+      ]
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+
+    const result = await osmProvider.scan({ mode: 'static', bounds: floridaBounds, zoom: 13 }, new AbortController().signal);
+    const byId = new Map(result.features.map(feature => [feature.sourceId, feature]));
+    expect(byId.get('1')?.bearing).toBe(225);
+    expect(byId.get('1')?.directionLabel).toBe('SW');
+    expect(byId.get('2')?.bearing).toBe(90);
+  });
+
+  it('keeps already-fetched ArcGIS pages when a later page fails', async () => {
+    let call = 0;
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      call += 1;
+      if (call === 2) return new Response('error', { status: 500 });
+      return new Response(JSON.stringify({
+        features: [{ geometry: { x: -80.19, y: 25.76 }, attributes: { ID: '1', IMAGE: 'https://example.test/1.jpg' } }],
+        exceededTransferLimit: true
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }));
+
+    const result = await fl511Provider.scan({ mode: 'static', bounds: floridaBounds, zoom: 13 }, new AbortController().signal);
+    expect(result.features).toHaveLength(1);
+    expect(result.pages).toBe(1);
+    expect(result.warning).toContain('PAGE 2 FAILED');
+  });
+
+  it('warns instead of silently truncating when the ArcGIS page limit is reached', async () => {
+    let call = 0;
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      call += 1;
+      return new Response(JSON.stringify({
+        features: [{ geometry: { x: -80.19, y: 25.76 }, attributes: { ID: String(call) } }],
+        exceededTransferLimit: true
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }));
+
+    const result = await fl511Provider.scan({ mode: 'static', bounds: floridaBounds, zoom: 13 }, new AbortController().signal);
+    expect(result.pages).toBe(20);
+    expect(result.features).toHaveLength(20);
+    expect(result.warning).toContain('RESULT LIMIT REACHED');
+  });
 });

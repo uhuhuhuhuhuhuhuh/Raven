@@ -12,6 +12,8 @@ export type ProviderScanRequest = {
 export type ProviderScanResult = {
   features: RavenFeature[];
   pages?: number;
+  /** Set when the provider returned usable but incomplete results. */
+  warning?: string;
 };
 
 export type RavenProvider = {

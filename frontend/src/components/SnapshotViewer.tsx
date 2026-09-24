@@ -28,10 +28,11 @@ export function SnapshotViewer({ feature }: { feature: RavenFeature }) {
   const [currentSrc, setCurrentSrc] = useState(feature.snapshotUrl || '');
   const [frameLoadedAt, setFrameLoadedAt] = useState<number | null>(null);
   const [failures, setFailures] = useState(0);
-  const [status, setStatus] = useState<'loading' | 'active' | 'stale' | 'offline'>('loading');
+  const [frameStatus, setFrameStatus] = useState<'loading' | 'active' | 'stale'>('loading');
   const generation = useRef(0);
 
   const age = sourceAge(feature.sourceUpdatedAt);
+  const status = failures >= 3 ? 'offline' : failures > 0 ? 'stale' : frameStatus;
 
   useEffect(() => {
     generation.current += 1;
@@ -49,15 +50,11 @@ export function SnapshotViewer({ feature }: { feature: RavenFeature }) {
         setFrameLoadedAt(Date.now());
         setFailures(0);
         const nextAge = sourceAge(feature.sourceUpdatedAt);
-        setStatus(nextAge !== null && nextAge > 120_000 ? 'stale' : 'active');
+        setFrameStatus(nextAge !== null && nextAge > 120_000 ? 'stale' : 'active');
       };
       image.onerror = () => {
         if (stopped || generation.current !== thisGeneration) return;
-        setFailures(previous => {
-          const nextFailures = previous + 1;
-          setStatus(nextFailures >= 3 ? 'offline' : 'stale');
-          return nextFailures;
-        });
+        setFailures(previous => previous + 1);
       };
       image.src = next;
     };

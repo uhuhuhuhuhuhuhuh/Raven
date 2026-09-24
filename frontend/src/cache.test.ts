@@ -1,5 +1,5 @@
-import { beforeEach, describe, expect, it } from 'vitest';
-import { clearProviderCache, getCachedProviderScan, providerCacheKey, putCachedProviderScan } from './cache';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { clearProviderCache, getCachedProviderScan, providerCacheKey, putCachedProviderScan, selectEvictions } from './cache';
 import type { RavenFeature } from './types';
 
 const bounds = { west: -80.3, south: 25.7, east: -80.1, north: 25.9 };
@@ -10,6 +10,7 @@ const feature: RavenFeature = {
 };
 
 beforeEach(async () => clearProviderCache());
+afterEach(() => vi.useRealTimers());
 
 describe('provider cache', () => {
   it('uses a deterministic provider plus bounds key', () => {
@@ -27,5 +28,29 @@ describe('provider cache', () => {
     await putCachedProviderScan('test-provider', bounds, [feature]);
     await clearProviderCache();
     expect(await getCachedProviderScan('test-provider', bounds, 60_000)).toBeNull();
+  });
+
+  it('evicts expired entries first, then the oldest entries beyond the cap', () => {
+    const now = 1_000_000;
+    const entries = [
+      { key: 'expired', savedAt: now - 10_000 },
+      { key: 'oldest-live', savedAt: now - 3_000 },
+      { key: 'middle', savedAt: now - 2_000 },
+      { key: 'newest', savedAt: now - 1_000 }
+    ];
+    expect(selectEvictions(entries, now, 5_000, 10)).toEqual(['expired']);
+    expect(selectEvictions(entries, now, 5_000, 2)).toEqual(['expired', 'oldest-live']);
+    expect(selectEvictions([], now, 5_000, 2)).toEqual([]);
+  });
+
+  it('bounds the in-memory fallback so long auto-scan sessions cannot grow without limit', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const start = Date.parse('2026-01-01T00:00:00Z');
+    for (let index = 0; index < 30; index += 1) {
+      vi.setSystemTime(start + index * 1000);
+      await putCachedProviderScan('test-provider', { ...bounds, west: bounds.west - index }, [feature]);
+    }
+    expect(await getCachedProviderScan('test-provider', { ...bounds, west: bounds.west - 0 }, 60 * 60 * 1000)).toBeNull();
+    expect(await getCachedProviderScan('test-provider', { ...bounds, west: bounds.west - 29 }, 60 * 60 * 1000)).not.toBeNull();
   });
 });

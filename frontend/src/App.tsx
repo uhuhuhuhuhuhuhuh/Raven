@@ -4,39 +4,16 @@ import { CameraViewer } from './components/CameraViewer';
 import { LayerPanel } from './components/LayerPanel';
 import { RavenMap, type MapFocus } from './components/RavenMap';
 import { VirtualContactList, type EnrichedFeature } from './components/VirtualContactList';
+import { bearingDegrees, distanceMeters, formatRange } from './geo';
+import { classLabel } from './labels';
+import { abortError } from './net';
 import { providerById, providerPlan, ravenProviders } from './providers/registry';
 import { searchPlace } from './search';
 import { allFeatures, createInitialState, hasSnapshot, hasStream, logEntry, ravenReducer, visibleFeatures } from './state';
 import type { LayerKey, RavenFeature, RavenMode, RavenViewport } from './types';
 
-function toRad(value: number) { return value * Math.PI / 180; }
-function toDeg(value: number) { return value * 180 / Math.PI; }
-function distanceMeters(aLat: number, aLon: number, bLat: number, bLon: number) {
-  const earth = 6371000;
-  const dLat = toRad(bLat - aLat);
-  const dLon = toRad(bLon - aLon);
-  const lat1 = toRad(aLat);
-  const lat2 = toRad(bLat);
-  const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
-  return 2 * earth * Math.asin(Math.sqrt(h));
-}
-function bearingDegrees(aLat: number, aLon: number, bLat: number, bLon: number) {
-  const y = Math.sin(toRad(bLon - aLon)) * Math.cos(toRad(bLat));
-  const x = Math.cos(toRad(aLat)) * Math.sin(toRad(bLat)) - Math.sin(toRad(aLat)) * Math.cos(toRad(bLat)) * Math.cos(toRad(bLon - aLon));
-  return (toDeg(Math.atan2(y, x)) + 360) % 360;
-}
-function formatRange(meters: number) { return meters >= 1000 ? `${(meters / 1000).toFixed(2)} km` : `${Math.round(meters)} m`; }
-function typeLabel(feature: RavenFeature) {
-  if (hasStream(feature)) return 'STREAM';
-  if (hasSnapshot(feature)) return 'SNAPSHOT';
-  if (feature.mediaType === 'external') return 'EXTERNAL';
-  return (feature.cameraType || 'unknown').toUpperCase();
-}
 function scanId() {
   return globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-}
-function abortError(error: unknown) {
-  return error instanceof DOMException && error.name === 'AbortError';
 }
 
 async function detectMode(): Promise<RavenMode> {
@@ -133,6 +110,7 @@ export default function App() {
     const results = await Promise.all(plan.active.map(async provider => {
       let cachedFeatures: RavenFeature[] | null = null;
       let cachedPages: number | undefined;
+      let progressFeatures: RavenFeature[] = [];
       const cacheTtl = provider.cacheTtlMs ?? 5 * 60 * 1000;
 
       try {
@@ -163,6 +141,7 @@ export default function App() {
           zoom: state.viewport.zoom,
           onProgress: (features, progress) => {
             if (controller.signal.aborted || scanControllerRef.current !== controller) return;
+            progressFeatures = features;
             dispatch({
               type: 'PROVIDER_PROGRESS',
               scanId: id,
@@ -181,11 +160,14 @@ export default function App() {
           providerId: provider.id,
           features: result.features,
           pages: result.pages,
+          warning: result.warning,
           timestamp: Date.now()
         });
-        void putCachedProviderScan(provider.id, state.viewport.bounds, result.features, result.pages);
-        addLog(provider.id.toUpperCase(), `${result.features.length} CONTACTS${result.pages && result.pages > 1 ? ` · ${result.pages} TILES/PAGES` : ''}`);
-        return { providerId: provider.id, status: 'ready' as const, count: result.features.length };
+        // Only complete results are cached, so a later restore never passes off a partial scan as whole.
+        if (!result.warning) void putCachedProviderScan(provider.id, state.viewport.bounds, result.features, result.pages);
+        const summary = `${result.features.length} CONTACTS${result.pages && result.pages > 1 ? ` · ${result.pages} TILES/PAGES` : ''}`;
+        addLog(provider.id.toUpperCase(), result.warning ? `${summary} · ${result.warning}` : summary, result.warning ? 'warn' : 'info');
+        return { providerId: provider.id, status: result.warning ? 'incomplete' as const : 'ready' as const, count: result.features.length };
       } catch (error) {
         if (controller.signal.aborted || abortError(error)) return { providerId: provider.id, status: 'aborted' as const };
         const message = error instanceof Error ? error.message : 'Provider scan failed';
@@ -203,15 +185,16 @@ export default function App() {
           addLog(provider.id.toUpperCase(), `NETWORK FAILED · USING CACHED DATA · ${message}`, 'warn');
           return { providerId: provider.id, status: 'cached' as const };
         }
-        dispatch({ type: 'PROVIDER_ERROR', scanId: id, providerId: provider.id, error: message, timestamp: Date.now() });
-        addLog(provider.id.toUpperCase(), message, 'error');
-        return { providerId: provider.id, status: 'error' as const };
+        // Keep whatever already streamed in rather than clearing contacts the user is looking at.
+        dispatch({ type: 'PROVIDER_ERROR', scanId: id, providerId: provider.id, error: message, features: progressFeatures, timestamp: Date.now() });
+        addLog(provider.id.toUpperCase(), progressFeatures.length ? `${message} · KEPT ${progressFeatures.length} PARTIAL CONTACTS` : message, 'error');
+        return { providerId: provider.id, status: progressFeatures.length ? 'incomplete' as const : 'error' as const };
       }
     }));
 
     if (controller.signal.aborted || scanControllerRef.current !== controller) return;
-    const usable = results.filter(result => result.status === 'ready' || result.status === 'cached').length;
-    const degraded = results.filter(result => result.status === 'error' || result.status === 'cached').length;
+    const usable = results.filter(result => result.status === 'ready' || result.status === 'cached' || result.status === 'incomplete').length;
+    const degraded = results.filter(result => result.status === 'error' || result.status === 'cached' || result.status === 'incomplete').length;
     const finalStatus = usable === 0 && degraded > 0 ? 'error' : degraded > 0 ? 'partial' : 'ready';
     dispatch({ type: 'SCAN_FINISH', scanId: id, status: finalStatus, timestamp: Date.now() });
     setActivity('READY');
@@ -247,7 +230,7 @@ export default function App() {
     }
   }
 
-  function useGps() {
+  function setGpsOrigin() {
     if (!navigator.geolocation) {
       addLog('GPS', 'GEOLOCATION UNAVAILABLE', 'error');
       return;
@@ -265,7 +248,7 @@ export default function App() {
     }, { enableHighAccuracy: true, timeout: 8000 });
   }
 
-  function useScanOrigin() {
+  function setScanOrigin() {
     const point = state.scan.center || state.viewport.center;
     dispatch({ type: 'REFERENCE_ORIGIN_SET', point, source: 'scan' });
     addLog('ORIGIN', 'DISTANCE / AZIMUTH REFERENCE SET TO SCAN CENTER');
@@ -329,9 +312,9 @@ export default function App() {
           <section className="detail-card panel">
             <div className="panel-title"><span>CONTACT DETAIL</span><button onClick={() => dispatch({ type: 'SELECT', id: null })}>×</button></div>
             <strong className="detail-name">{selected.name || 'CAMERA'}</strong>
-            <CameraViewer feature={selected} />
+            <CameraViewer key={selected.id} feature={selected} />
             <dl>
-              <div><dt>CLASS</dt><dd>{typeLabel(selected)}</dd></div>
+              <div><dt>CLASS</dt><dd>{classLabel(selected)}</dd></div>
               <div><dt>RANGE</dt><dd>{formatRange(selected.distance)}</dd></div>
               <div><dt>AZIMUTH</dt><dd>{Math.round(selected.azimuth)}°</dd></div>
               <div><dt>COORD</dt><dd>{selected.lat.toFixed(6)}, {selected.lon.toFixed(6)}</dd></div>
@@ -357,7 +340,7 @@ export default function App() {
           <ClassCount label="STREAM" value={mediaCounts.stream} />
           <ClassCount label="SPEED" value={mediaCounts.speed} />
         </section>
-        <MetricCard label="NEAREST" value={enriched[0] ? formatRange(enriched[0].distance) : '—'} sub={enriched[0] ? typeLabel(enriched[0]) : 'NO VISIBLE CONTACT'} />
+        <MetricCard label="NEAREST" value={enriched[0] ? formatRange(enriched[0].distance) : '—'} sub={enriched[0] ? classLabel(enriched[0]) : 'NO VISIBLE CONTACT'} />
         <section className="analytics-card provider-health">
           <div className="section-label">PROVIDER HEALTH</div>
           {ravenProviders.map(provider => {
@@ -388,8 +371,8 @@ export default function App() {
 
       <footer className="command-bar panel">
         <button className="command primary" disabled={state.mode === 'detecting' || state.scan.status === 'scanning'} onClick={() => void runScan('manual')}>SCAN VIEW</button>
-        <button className="command" onClick={useGps}>GPS ORIGIN</button>
-        <button className="command" onClick={useScanOrigin}>SCAN ORIGIN</button>
+        <button className="command" onClick={setGpsOrigin}>GPS ORIGIN</button>
+        <button className="command" onClick={setScanOrigin}>SCAN ORIGIN</button>
         <button className={`command ${state.autoScan ? 'on' : ''}`} aria-pressed={state.autoScan} onClick={() => dispatch({ type: 'AUTO_SCAN_SET', value: !state.autoScan })}>AUTO SCAN</button>
         <button className="command" onClick={() => void clearCache()}>CLEAR CACHE</button>
         <div className="scan-readout"><span>SCAN MODEL</span><strong>VISIBLE BOUNDS · SAFE TILES · z{state.viewport.zoom.toFixed(1)}</strong></div>

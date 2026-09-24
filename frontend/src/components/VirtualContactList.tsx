@@ -1,31 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { hasSnapshot, hasStream } from '../state';
+import { formatRange } from '../geo';
+import { mediaClass, shortClassLabel } from '../labels';
 import type { RavenFeature } from '../types';
 
 export type EnrichedFeature = RavenFeature & { distance: number; azimuth: number };
 
 const ROW_HEIGHT = 62;
 const OVERSCAN = 8;
-
-function formatRange(meters: number) {
-  return meters >= 1000 ? `${(meters / 1000).toFixed(2)} km` : `${Math.round(meters)} m`;
-}
-
-function typeLabel(feature: RavenFeature) {
-  const stream = hasStream(feature);
-  const snapshot = hasSnapshot(feature);
-  if (stream && snapshot) return 'STREAM+SNAP';
-  if (stream) return 'STREAM';
-  if (snapshot) return 'SNAP';
-  if (feature.cameraType === 'speed') return 'SPEED';
-  return (feature.cameraType || 'unknown').toUpperCase();
-}
-
-function mediaClass(feature: RavenFeature) {
-  if (hasStream(feature)) return 'stream';
-  if (hasSnapshot(feature)) return 'snapshot';
-  return feature.mediaType;
-}
 
 export function VirtualContactList({
   features,
@@ -76,7 +57,7 @@ export function VirtualContactList({
                   <strong>{feature.name || 'CAMERA'}</strong>
                   <small>RNG {formatRange(feature.distance)} · AZ {Math.round(feature.azimuth)}°</small>
                 </span>
-                <span className={`contact-tag media-${mediaClass(feature)}`}>{typeLabel(feature)}</span>
+                <span className={`contact-tag media-${mediaClass(feature)}`}>{shortClassLabel(feature)}</span>
               </button>
             );
           })}

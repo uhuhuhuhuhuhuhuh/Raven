@@ -9,6 +9,7 @@ function isMobile(page: Page) {
 test.beforeEach(async ({ page }) => {
   await page.route('**/api/health', route => route.fulfill({ status: 404, body: '{}' }));
   await page.route('https://tile.openstreetmap.org/**', route => route.fulfill({ status: 200, contentType: 'image/png', body: transparentPng }));
+  await page.route('https://fonts.openmaptiles.org/**', route => route.fulfill({ status: 200, contentType: 'application/x-protobuf', body: Buffer.alloc(0) }));
 });
 
 test('snapshot layers hide and restore without destructive data loss', async ({ page }) => {
@@ -100,4 +101,51 @@ test('moving the map marks completed results stale', async ({ page }) => {
   await expect(page.getByText('● READY')).toBeVisible();
   await page.getByRole('button', { name: 'Zoom in' }).click();
   await expect(page.getByText(/RESULTS ARE FROM THE PREVIOUS SCAN/)).toBeVisible();
+});
+
+test('upgrades an existing v1 provider cache and prunes expired entries', async ({ page }) => {
+  await page.route('https://overpass-api.de/api/interpreter', route => route.fulfill({ status: 200, contentType: 'application/json', body: '{"elements":[]}' }));
+  await page.route('**/FL511_Traffic_Cameras/FeatureServer/0/query*', route => route.fulfill({ status: 200, contentType: 'application/json', body: '{"features":[],"exceededTransferLimit":false}' }));
+  await page.goto('/');
+
+  // Recreate the cache exactly as Raven 1.1 (schema v1, no savedAt index) left it.
+  await page.evaluate(() => new Promise<void>((resolve, reject) => {
+    const request = indexedDB.open('raven-provider-cache', 1);
+    request.onupgradeneeded = () => request.result.createObjectStore('providerScans', { keyPath: 'key' });
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const database = request.result;
+      const transaction = database.transaction('providerScans', 'readwrite');
+      const store = transaction.objectStore('providerScans');
+      const record = { providerId: 'legacy', bounds: { west: 0, south: 0, east: 1, north: 1 }, features: [] };
+      store.put({ ...record, key: 'legacy:expired', savedAt: Date.now() - 2 * 60 * 60 * 1000 });
+      store.put({ ...record, key: 'legacy:recent', savedAt: Date.now() - 1000 });
+      transaction.oncomplete = () => { database.close(); resolve(); };
+    };
+  }));
+
+  await page.getByRole('button', { name: 'SCAN VIEW' }).click();
+  await expect(page.getByText('● READY')).toBeVisible();
+
+  const readCache = () => page.evaluate(() => new Promise<{ version: number; indexes: string[]; keys: string[] }>((resolve, reject) => {
+    const request = indexedDB.open('raven-provider-cache');
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const database = request.result;
+      const store = database.transaction('providerScans', 'readonly').objectStore('providerScans');
+      const keys = store.getAllKeys();
+      keys.onsuccess = () => {
+        const result = { version: database.version, indexes: Array.from(store.indexNames), keys: keys.result.map(String) };
+        database.close();
+        resolve(result);
+      };
+    };
+  }));
+
+  await expect.poll(async () => (await readCache()).keys.some(key => key.startsWith('osm-overpass:'))).toBe(true);
+  const cache = await readCache();
+  expect(cache.version).toBe(2);
+  expect(cache.indexes).toContain('savedAt');
+  expect(cache.keys).toContain('legacy:recent');
+  expect(cache.keys).not.toContain('legacy:expired');
 });

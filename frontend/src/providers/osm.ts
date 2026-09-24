@@ -1,4 +1,6 @@
+import { abortError, fetchWithRetry } from '../net';
 import type { RavenBounds, RavenFeature } from '../types';
+import { parseViewingDirection } from './normalize';
 import type { RavenProvider } from './types';
 
 const OVERPASS = 'https://overpass-api.de/api/interpreter';
@@ -17,16 +19,12 @@ function cameraType(tags: Record<string, string>): RavenFeature['cameraType'] {
   return 'unknown';
 }
 
-function parseBearing(value?: string): number | undefined {
-  if (!value) return undefined;
-  const parsed = Number(value.replace('°', '').trim());
-  return Number.isFinite(parsed) ? ((parsed % 360) + 360) % 360 : undefined;
-}
-
 function normalizeElement(element: any): RavenFeature | null {
   if (typeof element?.lat !== 'number' || typeof element?.lon !== 'number') return null;
   const tags = (element.tags || {}) as Record<string, string>;
   const address = [tags['addr:housenumber'], tags['addr:street'], tags['addr:city']].filter(Boolean).join(' ') || undefined;
+  // `camera:direction` is the documented surveillance tag; plain `direction` is the common fallback.
+  const direction = tags['camera:direction'] ?? tags.direction;
   return {
     id: `osm-${element.type}-${element.id}`,
     providerId: 'osm-overpass',
@@ -39,8 +37,8 @@ function normalizeElement(element: any): RavenFeature | null {
     lat: element.lat,
     lon: element.lon,
     address,
-    bearing: parseBearing(tags.direction),
-    directionLabel: tags.direction,
+    bearing: parseViewingDirection(direction),
+    directionLabel: direction,
     operator: tags.operator,
     zone: tags['surveillance:zone'],
     sourceUrl: `https://www.openstreetmap.org/${element.type}/${element.id}`,
@@ -96,7 +94,7 @@ async function scanTile(mode: 'static' | 'local', bounds: RavenBounds, signal: A
   const bbox = `${south},${west},${north},${east}`;
   const overpassQuery = `[out:json][timeout:25];(node["man_made"="surveillance"](${bbox});node["highway"="speed_camera"](${bbox}););out body;`;
   const body = new URLSearchParams({ data: overpassQuery });
-  const response = await fetch(OVERPASS, {
+  const response = await fetchWithRetry(OVERPASS, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
     body,
@@ -120,15 +118,30 @@ export const osmProvider: RavenProvider = {
     const tiles = tileBounds(request.bounds);
     const deduped = new Map<string, RavenFeature>();
     let completed = 0;
+    let failed = 0;
+    let firstError: unknown;
 
     for (const tile of tiles) {
       if (signal.aborted) throw new DOMException('Scan aborted', 'AbortError');
-      const features = await scanTile(request.mode === 'local' ? 'local' : 'static', tile, signal);
-      for (const feature of features) deduped.set(feature.id, feature);
+      try {
+        const features = await scanTile(request.mode === 'local' ? 'local' : 'static', tile, signal);
+        for (const feature of features) deduped.set(feature.id, feature);
+      } catch (error) {
+        if (signal.aborted || abortError(error)) throw error;
+        // Keep going: one overloaded tile should not discard the tiles already on the map.
+        failed += 1;
+        firstError ??= error;
+      }
       completed += 1;
       request.onProgress?.(Array.from(deduped.values()), { completed, total: tiles.length });
     }
 
-    return { features: Array.from(deduped.values()), pages: tiles.length };
+    if (failed === tiles.length) throw firstError;
+    const reason = firstError instanceof Error ? firstError.message : 'tile request failed';
+    return {
+      features: Array.from(deduped.values()),
+      pages: tiles.length,
+      warning: failed ? `${failed}/${tiles.length} TILES FAILED · RESULTS INCOMPLETE · ${reason}` : undefined
+    };
   }
 };
