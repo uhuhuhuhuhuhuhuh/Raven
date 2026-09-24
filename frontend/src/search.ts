@@ -1,3 +1,4 @@
+import { sleep } from './net';
 import type { RavenMode } from './types';
 
 const NOMINATIM = 'https://nominatim.openstreetmap.org/search';
@@ -11,16 +12,6 @@ function parseCoordinates(query: string): { lat: number; lon: number; label: str
   const lon = Number(match[2]);
   if (!Number.isFinite(lat) || !Number.isFinite(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180) return null;
   return { lat, lon, label: `${lat.toFixed(6)}, ${lon.toFixed(6)}` };
-}
-
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const timer = window.setTimeout(resolve, ms);
-    signal?.addEventListener('abort', () => {
-      clearTimeout(timer);
-      reject(new DOMException('Search aborted', 'AbortError'));
-    }, { once: true });
-  });
 }
 
 export async function searchPlace(mode: RavenMode, query: string, signal?: AbortSignal): Promise<{ lat: number; lon: number; label: string } | null> {

@@ -1,3 +1,4 @@
+import type { MapView } from './permalink';
 import type {
   LayerKey,
   ProviderProgress,
@@ -46,26 +47,40 @@ export type RavenAction =
   | { type: 'LOG'; entry: RavenLogEntry }
   | { type: 'CLEAR_LOGS' };
 
-const MIAMI = { lat: 25.7617, lon: -80.1918 };
-const DEFAULT_BOUNDS: RavenBounds = { west: -80.24, south: 25.72, east: -80.14, north: 25.80 };
+export const DEFAULT_VIEW: MapView = { lat: 25.7617, lon: -80.1918, zoom: 13.4 };
 
-export function createInitialState(): RavenState {
+export const DEFAULT_LAYERS: Record<LayerKey, boolean> = {
+  mappedCameras: true,
+  snapshots: true,
+  streams: true,
+  speedCameras: true,
+  heat: false,
+  scanOutline: true,
+  fov: true,
+  rings: false
+};
+
+export const LAYER_KEYS = Object.keys(DEFAULT_LAYERS) as LayerKey[];
+
+/** Rough bounds for a ~1024x768 view; replaced by the map's real bounds once it loads. */
+function approximateBounds(view: MapView): RavenBounds {
+  const degreesPerTile = 360 / 2 ** view.zoom;
+  const halfWidth = 2 * degreesPerTile;
+  const halfHeight = 1.5 * degreesPerTile * Math.cos(view.lat * Math.PI / 180);
+  return { west: view.lon - halfWidth, south: view.lat - halfHeight, east: view.lon + halfWidth, north: view.lat + halfHeight };
+}
+
+export function createInitialState(view: MapView = DEFAULT_VIEW, layers: Partial<Record<LayerKey, boolean>> = {}, autoScan = false): RavenState {
+  const center = { lat: view.lat, lon: view.lon };
   return {
     mode: 'detecting',
-    viewport: { center: MIAMI, bounds: DEFAULT_BOUNDS, zoom: 13.4 },
-    referenceOrigin: { ...MIAMI, source: 'scan' },
+    viewport: { center, bounds: approximateBounds(view), zoom: view.zoom },
+    referenceOrigin: { ...center, source: 'scan' },
     scan: { status: 'idle' },
     providers: {},
-    layers: {
-      mappedCameras: true,
-      snapshots: true,
-      streams: true,
-      speedCameras: true,
-      heat: false,
-      scanOutline: true
-    },
+    layers: { ...DEFAULT_LAYERS, ...layers },
     selectionId: null,
-    autoScan: false,
+    autoScan,
     logs: [logEntry('SYSTEM', 'RAVEN STATE ENGINE INITIALIZED')]
   };
 }

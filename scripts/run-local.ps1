@@ -13,6 +13,7 @@ if (-not (Get-Command npm -ErrorAction SilentlyContinue)) { throw "Node.js/npm i
 Push-Location frontend
 npm ci --no-audit --no-fund
 npm run build
+npm run build:api
 Pop-Location
 
 Write-Host "[RAVEN] Local WebUI: http://127.0.0.1:8742"

@@ -1,8 +1,16 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import maplibregl, { type GeoJSONSource, type Map as MapLibreMap } from 'maplibre-gl';
-import type { RavenBounds, RavenFeature, RavenViewport } from '../types';
+import { normalizeViewport } from '../geo';
+import { fovCollection, rangeRingCollection } from '../overlays';
+import type { MapView } from '../permalink';
+import type { RavenBounds, RavenFeature, RavenPoint, RavenViewport } from '../types';
+
+// Symbol layers (cluster counts) cannot render text without a glyph source.
+const GLYPHS_URL = 'https://fonts.openmaptiles.org/{fontstack}/{range}.pbf';
 
 export type MapFocus = { lat: number; lon: number; zoom: number; token: number } | null;
+
+const EMPTY_COLLECTION = { type: 'FeatureCollection' as const, features: [] };
 
 function featureCollection(features: RavenFeature[], selectedId: string | null) {
   return {
@@ -42,26 +50,37 @@ function boundsPolygon(bounds?: RavenBounds) {
 }
 
 export function RavenMap({
+  initialView,
   features,
   selectedId,
   scanBounds,
+  origin,
   heatEnabled,
   outlineEnabled,
+  fovEnabled,
+  ringsEnabled,
   focus,
   onViewportChange,
   onSelect
 }: {
+  initialView: MapView;
   features: RavenFeature[];
   selectedId: string | null;
   scanBounds?: RavenBounds;
+  origin: RavenPoint;
   heatEnabled: boolean;
   outlineEnabled: boolean;
+  fovEnabled: boolean;
+  ringsEnabled: boolean;
   focus: MapFocus;
   onViewportChange: (viewport: RavenViewport) => void;
   onSelect: (id: string) => void;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
+  // Overlay effects re-run once the style loads, so props set before then are not lost.
+  const [ready, setReady] = useState(false);
+  const initialViewRef = useRef(initialView);
   const onViewportRef = useRef(onViewportChange);
   const onSelectRef = useRef(onSelect);
 
@@ -72,11 +91,12 @@ export function RavenMap({
     if (!containerRef.current || mapRef.current) return;
     const map = new maplibregl.Map({
       container: containerRef.current,
-      center: [-80.1918, 25.7617],
-      zoom: 13.4,
+      center: [initialViewRef.current.lon, initialViewRef.current.lat],
+      zoom: initialViewRef.current.zoom,
       attributionControl: { compact: true },
       style: {
         version: 8,
+        glyphs: GLYPHS_URL,
         sources: {
           osm: {
             type: 'raster',
@@ -105,7 +125,7 @@ export function RavenMap({
     const emitViewport = () => {
       const center = map.getCenter();
       const bounds = map.getBounds();
-      onViewportRef.current({
+      onViewportRef.current(normalizeViewport({
         center: { lat: center.lat, lon: center.lng },
         bounds: {
           west: bounds.getWest(),
@@ -114,7 +134,7 @@ export function RavenMap({
           north: bounds.getNorth()
         },
         zoom: map.getZoom()
-      });
+      }));
     };
 
     map.on('load', () => {
@@ -127,6 +147,8 @@ export function RavenMap({
       });
       map.addSource('contacts-heat', { type: 'geojson', data: featureCollection([], null) });
       map.addSource('scan-area', { type: 'geojson', data: boundsPolygon() });
+      map.addSource('fov', { type: 'geojson', data: EMPTY_COLLECTION });
+      map.addSource('rings', { type: 'geojson', data: EMPTY_COLLECTION });
 
       map.addLayer({
         id: 'contacts-heat',
@@ -140,6 +162,27 @@ export function RavenMap({
           'heatmap-opacity': 0
         }
       });
+
+      map.addLayer({
+        id: 'rings-line',
+        type: 'line',
+        source: 'rings',
+        filter: ['==', ['geometry-type'], 'LineString'],
+        layout: { visibility: 'none' },
+        paint: { 'line-color': '#65f0b5', 'line-width': 1, 'line-opacity': 0.45, 'line-dasharray': [4, 3] }
+      });
+      map.addLayer({
+        id: 'rings-label',
+        type: 'symbol',
+        source: 'rings',
+        filter: ['==', ['geometry-type'], 'Point'],
+        layout: { visibility: 'none', 'text-field': ['get', 'label'], 'text-font': ['Open Sans Bold'], 'text-size': 10, 'text-offset': [0, -0.8] },
+        paint: { 'text-color': '#65f0b5', 'text-halo-color': '#07100d', 'text-halo-width': 1.5 }
+      });
+
+      // Wedges are tens of metres across, so they only read once zoomed in.
+      map.addLayer({ id: 'fov-fill', type: 'fill', source: 'fov', minzoom: 15, layout: { visibility: 'none' }, paint: { 'fill-color': '#62f2ff', 'fill-opacity': 0.12 } });
+      map.addLayer({ id: 'fov-line', type: 'line', source: 'fov', minzoom: 15, layout: { visibility: 'none' }, paint: { 'line-color': '#62f2ff', 'line-width': 1, 'line-opacity': 0.5 } });
 
       map.addLayer({
         id: 'clusters',
@@ -160,7 +203,7 @@ export function RavenMap({
         type: 'symbol',
         source: 'contacts',
         filter: ['has', 'point_count'],
-        layout: { 'text-field': ['get', 'point_count_abbreviated'], 'text-size': 11 },
+        layout: { 'text-field': ['get', 'point_count_abbreviated'], 'text-font': ['Open Sans Bold'], 'text-size': 11 },
         paint: { 'text-color': '#d9ffec' }
       });
 
@@ -209,6 +252,7 @@ export function RavenMap({
         map.on('mouseleave', layer, () => { map.getCanvas().style.cursor = ''; });
       }
       emitViewport();
+      setReady(true);
     });
 
     map.on('moveend', emitViewport);
@@ -216,34 +260,50 @@ export function RavenMap({
     return () => {
       map.remove();
       mapRef.current = null;
+      setReady(false);
     };
   }, []);
 
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || !map.isStyleLoaded()) return;
+    if (!map || !ready) return;
     const data = featureCollection(features, selectedId);
     (map.getSource('contacts') as GeoJSONSource | undefined)?.setData(data as any);
     (map.getSource('contacts-heat') as GeoJSONSource | undefined)?.setData(data as any);
-  }, [features, selectedId]);
+  }, [ready, features, selectedId]);
 
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || !map.isStyleLoaded()) return;
+    if (!map || !ready) return;
     (map.getSource('scan-area') as GeoJSONSource | undefined)?.setData(boundsPolygon(scanBounds) as any);
-    if (map.getLayer('scan-area-line')) map.setPaintProperty('scan-area-line', 'line-opacity', outlineEnabled ? 0.7 : 0);
-    if (map.getLayer('scan-area-fill')) map.setPaintProperty('scan-area-fill', 'fill-opacity', outlineEnabled ? 0.025 : 0);
-  }, [scanBounds, outlineEnabled]);
+    map.setPaintProperty('scan-area-line', 'line-opacity', outlineEnabled ? 0.7 : 0);
+    map.setPaintProperty('scan-area-fill', 'fill-opacity', outlineEnabled ? 0.025 : 0);
+  }, [ready, scanBounds, outlineEnabled]);
 
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || !map.isStyleLoaded() || !map.getLayer('contacts-heat')) return;
+    if (!map || !ready) return;
     map.setPaintProperty('contacts-heat', 'heatmap-opacity', heatEnabled ? 0.72 : 0);
-  }, [heatEnabled]);
+  }, [ready, heatEnabled]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    (map.getSource('fov') as GeoJSONSource | undefined)?.setData(fovEnabled ? fovCollection(features) : EMPTY_COLLECTION);
+    for (const layer of ['fov-fill', 'fov-line']) map.setLayoutProperty(layer, 'visibility', fovEnabled ? 'visible' : 'none');
+  }, [ready, features, fovEnabled]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    (map.getSource('rings') as GeoJSONSource | undefined)?.setData(ringsEnabled ? rangeRingCollection(origin) : EMPTY_COLLECTION);
+    for (const layer of ['rings-line', 'rings-label']) map.setLayoutProperty(layer, 'visibility', ringsEnabled ? 'visible' : 'none');
+  }, [ready, origin, ringsEnabled]);
 
   useEffect(() => {
     if (!focus || !mapRef.current) return;
-    mapRef.current.flyTo({ center: [focus.lon, focus.lat], zoom: focus.zoom, essential: true });
+    // Not marked essential, so MapLibre jumps instead of flying when the user prefers reduced motion.
+    mapRef.current.flyTo({ center: [focus.lon, focus.lat], zoom: focus.zoom });
   }, [focus]);
 
   return <div ref={containerRef} className="map-canvas" aria-label="Raven public camera map" />;

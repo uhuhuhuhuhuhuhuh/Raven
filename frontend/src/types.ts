@@ -70,7 +70,7 @@ export type ProviderRun = {
   skipReason?: string;
 };
 
-export type LayerKey = 'mappedCameras' | 'snapshots' | 'streams' | 'speedCameras' | 'heat' | 'scanOutline';
+export type LayerKey = 'mappedCameras' | 'snapshots' | 'streams' | 'speedCameras' | 'heat' | 'scanOutline' | 'fov' | 'rings';
 
 export type RavenLogEntry = {
   id: string;

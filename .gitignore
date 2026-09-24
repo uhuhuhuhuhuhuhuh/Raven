@@ -5,3 +5,7 @@ frontend/node_modules/
 frontend/dist/
 server/data/
 .DS_Store
+frontend/test-results/
+frontend/playwright-report/
+.pytest_cache/
+frontend/public/api/

@@ -1,22 +1,15 @@
 import type { RavenFeature } from '../types';
+import { queryArcGisEnvelope, type ArcGisLayer } from './arcgis';
+import { publicHttpsUrl } from './normalize';
 import { clipBounds, type RavenProvider } from './types';
 
 const CALTRANS_CCTV = 'https://caltrans-gis.dot.ca.gov/arcgis/rest/services/CHhighway/CCTV/FeatureServer/0/query';
 const CALIFORNIA_BOUNDS = { west: -124.6, south: 32.3, east: -114.0, north: 42.2 };
-const PAGE_SIZE = 2000;
-const MAX_PAGES = 20;
 
-function publicHttpsUrl(value?: unknown): string | undefined {
-  if (typeof value !== 'string' || !value.trim()) return undefined;
-  const trimmed = value.trim();
-  if (trimmed.startsWith('https://')) return trimmed;
-  if (trimmed.startsWith('//')) return `https:${trimmed}`;
-  return undefined;
-}
-
+/** A media resource the browser can play in-app: progressive video or an HLS playlist. */
 function directVideoUrl(value?: string): string | undefined {
   if (!value) return undefined;
-  return /\.(?:mp4|webm|ogg|ogv)(?:[?#].*)?$/i.test(value) ? value : undefined;
+  return /\.(?:mp4|webm|ogg|ogv|m3u8)(?:[?#].*)?$/i.test(value) ? value : undefined;
 }
 
 function recordTimestamp(attributes: Record<string, any>): string | undefined {
@@ -66,27 +59,17 @@ function normalizeFeature(feature: any): RavenFeature | null {
   };
 }
 
-async function requestPage(envelope: string, offset: number, signal: AbortSignal) {
-  const query = new URLSearchParams({
-    where: '1=1',
-    geometry: envelope,
-    geometryType: 'esriGeometryEnvelope',
-    inSR: '4326',
-    spatialRel: 'esriSpatialRelIntersects',
-    outFields: 'OBJECTID,index_,recordDate,recordTime,recordEpoch,district,locationName,nearbyPlace,longitude,latitude,direction,county,route,inService,imageDescription,streamingVideoURL,currentImageUpdateFrequency,currentImageURL',
-    returnGeometry: 'true',
-    outSR: '4326',
-    orderByFields: 'OBJECTID ASC',
-    resultOffset: String(offset),
-    resultRecordCount: String(PAGE_SIZE),
-    f: 'json'
-  });
-  const response = await fetch(`${CALTRANS_CCTV}?${query.toString()}`, { signal, headers: { Accept: 'application/json' } });
-  if (!response.ok) throw new Error(`Caltrans CCTV query failed (${response.status})`);
-  const payload = await response.json();
-  if (payload?.error) throw new Error(payload.error.message || 'Caltrans CCTV query failed');
-  return payload;
-}
+const CALTRANS_LAYER: ArcGisLayer = {
+  url: CALTRANS_CCTV,
+  label: 'Caltrans CCTV',
+  outFields: [
+    'OBJECTID', 'index_', 'recordDate', 'recordTime', 'recordEpoch', 'district', 'locationName', 'nearbyPlace',
+    'longitude', 'latitude', 'direction', 'county', 'route', 'inService', 'imageDescription', 'streamingVideoURL',
+    'currentImageUpdateFrequency', 'currentImageURL'
+  ],
+  orderByField: 'OBJECTID',
+  normalize: normalizeFeature
+};
 
 export const caltransProvider: RavenProvider = {
   id: 'caltrans-cctv',
@@ -98,23 +81,6 @@ export const caltransProvider: RavenProvider = {
   async scan(request, signal) {
     const clipped = clipBounds(request.bounds, CALIFORNIA_BOUNDS);
     if (!clipped) return { features: [], pages: 0 };
-    const envelope = [clipped.west, clipped.south, clipped.east, clipped.north].join(',');
-    const deduped = new Map<string, RavenFeature>();
-    let pages = 0;
-
-    for (let offset = 0; pages < MAX_PAGES; offset += PAGE_SIZE) {
-      if (signal.aborted) throw new DOMException('Scan aborted', 'AbortError');
-      const payload = await requestPage(envelope, offset, signal);
-      pages += 1;
-      const normalized = (payload.features || [])
-        .map(normalizeFeature)
-        .filter((feature: RavenFeature | null): feature is RavenFeature => Boolean(feature));
-      for (const feature of normalized) deduped.set(feature.id, feature);
-      const more = Boolean(payload.exceededTransferLimit) || (payload.features || []).length >= PAGE_SIZE;
-      request.onProgress?.(Array.from(deduped.values()), { completed: pages, total: more ? pages + 1 : pages });
-      if (!more || (payload.features || []).length === 0) break;
-    }
-
-    return { features: Array.from(deduped.values()), pages };
+    return queryArcGisEnvelope(CALTRANS_LAYER, clipped, signal, request.onProgress);
   }
 };

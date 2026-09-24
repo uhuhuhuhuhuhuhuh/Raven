@@ -6,12 +6,16 @@ export type ProviderScanRequest = {
   mode: RavenMode;
   bounds: RavenBounds;
   zoom: number;
+  /** Base URL of Raven's static API (…/api/v1/), whose osm/ tiles can stand in for Overpass. */
+  staticApiBase?: string;
   onProgress?: (features: RavenFeature[], progress: ProviderProgress) => void;
 };
 
 export type ProviderScanResult = {
   features: RavenFeature[];
   pages?: number;
+  /** Set when the provider returned usable but incomplete results. */
+  warning?: string;
 };
 
 export type RavenProvider = {

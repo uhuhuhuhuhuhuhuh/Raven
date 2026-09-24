@@ -6,7 +6,9 @@ const LAYERS: Array<{ key: LayerKey; label: string; group: 'CAMERAS' | 'OVERLAYS
   { key: 'streams', label: 'VIDEO STREAMS', group: 'CAMERAS', hint: 'Continuous public video' },
   { key: 'speedCameras', label: 'SPEED CAMERAS', group: 'CAMERAS', hint: 'Mapped speed-camera records' },
   { key: 'heat', label: 'HEATMAP', group: 'OVERLAYS', hint: 'Visible-contact density' },
-  { key: 'scanOutline', label: 'SCAN OUTLINE', group: 'OVERLAYS', hint: 'Last queried viewport' }
+  { key: 'scanOutline', label: 'SCAN OUTLINE', group: 'OVERLAYS', hint: 'Last queried viewport' },
+  { key: 'fov', label: 'FIELD OF VIEW', group: 'OVERLAYS', hint: 'Approx. facing where tagged · z15+' },
+  { key: 'rings', label: 'RANGE RINGS', group: 'OVERLAYS', hint: 'Distance from reference origin' }
 ];
 
 export function LayerPanel({
