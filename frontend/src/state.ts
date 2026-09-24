@@ -58,7 +58,8 @@ export const DEFAULT_LAYERS: Record<LayerKey, boolean> = {
   heat: false,
   scanOutline: true,
   fov: true,
-  rings: false
+  rings: false,
+  recent: true
 };
 
 export const LAYER_KEYS = Object.keys(DEFAULT_LAYERS) as LayerKey[];

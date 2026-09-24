@@ -28,17 +28,24 @@ async function catalog(provider: RavenProvider): Promise<ProviderCatalogResult> 
   }
 }
 
-async function osmEndpoint(): Promise<Record<string, string>> {
-  try {
-    await readFile(join(outDir, 'osm', 'index.json'));
-    return { osmTiles: 'osm/index.json' };
-  } catch {
-    return {};
+const OSM_ENDPOINTS: Record<string, string> = { osmTiles: 'osm/index.json', osmChanges: 'osm/changes.json', osmChangesFeed: 'osm/changes.atom' };
+
+/** Lists the extract files (tiles, weekly changes, feed) that exist in this build. */
+async function osmEndpoints(): Promise<Record<string, string>> {
+  const present: Record<string, string> = {};
+  for (const [name, path] of Object.entries(OSM_ENDPOINTS)) {
+    try {
+      await readFile(join(outDir, path));
+      present[name] = path;
+    } catch {
+      // Not published in this build.
+    }
   }
+  return present;
 }
 
 const results = await Promise.all(PROVIDERS.map(catalog));
-const files = buildStaticApi(results, new Date().toISOString(), await osmEndpoint());
+const files = buildStaticApi(results, new Date().toISOString(), await osmEndpoints());
 await mkdir(outDir, { recursive: true });
 for (const [name, document] of Object.entries(files)) {
   await writeFile(join(outDir, name), JSON.stringify(document));

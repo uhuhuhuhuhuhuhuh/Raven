@@ -167,3 +167,25 @@ export async function loadTileElements(
   if (keys.length > 0 && failed === keys.length) throw firstError;
   return { tiles: keys.length, failed, firstError };
 }
+
+export type OsmChanges = {
+  since: string | null;
+  until: string | null;
+  addedCount: number;
+  removedCount: number;
+  added: Array<[number, number, number, Record<string, string>]>;
+  feed?: string;
+};
+
+/** changes.json from the weekly extract build; null for a baseline, a missing file or an unknown shape. */
+export async function loadOsmChanges(apiBase: string): Promise<OsmChanges | null> {
+  try {
+    const response = await fetch(new URL('osm/changes.json', apiBase), { headers: { Accept: 'application/json' } });
+    if (!response.ok) return null;
+    const changes = (await response.json()) as Partial<OsmChanges> & { version?: number; baseline?: boolean };
+    if (changes?.version !== 1 || changes.baseline || !Array.isArray(changes.added)) return null;
+    return changes as OsmChanges;
+  } catch {
+    return null;
+  }
+}

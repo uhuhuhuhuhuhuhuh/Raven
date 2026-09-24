@@ -17,6 +17,7 @@ test.beforeEach(async ({ page }) => {
   await page.route('**/api/health', route => route.fulfill({ status: 404, body: '{}' }));
   // No extract tiles unless a test publishes some; keeps scans off the dev server's /api proxy.
   await page.route('**/api/v1/osm/index.json', route => route.fulfill({ status: 404, body: '' }));
+  await page.route('**/api/v1/osm/changes.json', route => route.fulfill({ status: 404, body: '' }));
   await page.route('https://tile.openstreetmap.org/**', route => route.fulfill({ status: 200, contentType: 'image/png', body: transparentPng }));
   await page.route('https://fonts.openmaptiles.org/**', route => route.fulfill({ status: 200, contentType: 'application/x-protobuf', body: Buffer.alloc(0) }));
   // A minimal stand-in for the OpenFreeMap style keeps the suite offline and deterministic.
@@ -299,4 +300,23 @@ test('reads published Geofabrik extract tiles instead of querying Overpass', asy
   if (isMobile(page)) await page.keyboard.press('Escape');
   await expect(page.locator('.detail-source')).toHaveText('© OpenStreetMap contributors · Geofabrik north-america/us, data as of 2026-09-22');
   expect(overpassRequests).toBe(0);
+});
+
+test('shows cameras newly mapped since the last weekly extract', async ({ page }) => {
+  await page.route('**/api/v1/osm/changes.json', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      version: 1, baseline: false, since: '2026-09-15T20:00:00Z', until: '2026-09-22T20:21:02Z', addedCount: 2, removedCount: 1,
+      added: [[5, 25.765, -80.19, { man_made: 'surveillance' }], [6, 25.766, -80.191, { man_made: 'surveillance', 'surveillance:type': 'ALPR' }]],
+      removed: [[9, 25.7, -80.2, {}]], feed: 'changes.atom'
+    })
+  }));
+  await page.goto('/');
+  await openPanel(page, 'LAYERS');
+  const card = page.locator('.analytics-card', { hasText: 'NEWLY MAPPED · OSM' });
+  await expect(card.locator('strong')).toHaveText('+2');
+  await expect(card).toContainText('1 REMOVED · 2026-09-15 → 2026-09-22');
+  await expect(card.getByRole('link', { name: 'ATOM FEED ↗' })).toHaveAttribute('href', /\/api\/v1\/osm\/changes\.atom$/);
+  await expect(page.getByRole('button', { name: /NEWLY MAPPED/ })).toHaveAttribute('aria-pressed', 'true');
 });

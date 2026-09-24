@@ -58,6 +58,8 @@ export function RavenMap({
   outlineEnabled,
   fovEnabled,
   ringsEnabled,
+  recentPoints,
+  recentEnabled,
   focus,
   onViewportChange,
   onSelect,
@@ -72,6 +74,9 @@ export function RavenMap({
   outlineEnabled: boolean;
   fovEnabled: boolean;
   ringsEnabled: boolean;
+  /** [lon, lat] of cameras newly mapped in OSM since the previous weekly extract. */
+  recentPoints: Array<[number, number]>;
+  recentEnabled: boolean;
   focus: MapFocus;
   onViewportChange: (viewport: RavenViewport) => void;
   onSelect: (id: string) => void;
@@ -134,6 +139,7 @@ export function RavenMap({
         map.addSource('scan-area', { type: 'geojson', data: boundsPolygon() });
         map.addSource('fov', { type: 'geojson', data: EMPTY_COLLECTION });
         map.addSource('rings', { type: 'geojson', data: EMPTY_COLLECTION });
+        map.addSource('recent', { type: 'geojson', data: EMPTY_COLLECTION });
 
         map.addLayer({
           id: 'contacts-heat',
@@ -168,6 +174,14 @@ export function RavenMap({
         // Wedges are tens of metres across, so they only read once zoomed in.
         map.addLayer({ id: 'fov-fill', type: 'fill', source: 'fov', minzoom: 15, layout: { visibility: 'none' }, paint: { 'fill-color': '#62f2ff', 'fill-opacity': 0.12 } });
         map.addLayer({ id: 'fov-line', type: 'line', source: 'fov', minzoom: 15, layout: { visibility: 'none' }, paint: { 'line-color': '#62f2ff', 'line-width': 1, 'line-opacity': 0.5 } });
+
+        map.addLayer({
+          id: 'recent-halo',
+          type: 'circle',
+          source: 'recent',
+          layout: { visibility: 'none' },
+          paint: { 'circle-radius': 10, 'circle-opacity': 0, 'circle-stroke-color': '#ffffff', 'circle-stroke-width': 1.5, 'circle-stroke-opacity': 0.85 }
+        });
 
         map.addLayer({
           id: 'clusters',
@@ -295,6 +309,17 @@ export function RavenMap({
     (map.getSource('rings') as GeoJSONSource | undefined)?.setData(ringsEnabled ? rangeRingCollection(origin) : EMPTY_COLLECTION);
     for (const layer of ['rings-line', 'rings-label']) map.setLayoutProperty(layer, 'visibility', ringsEnabled ? 'visible' : 'none');
   }, [ready, origin, ringsEnabled]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    const data = {
+      type: 'FeatureCollection' as const,
+      features: recentEnabled ? recentPoints.map(coordinates => ({ type: 'Feature' as const, properties: {}, geometry: { type: 'Point' as const, coordinates } })) : []
+    };
+    (map.getSource('recent') as GeoJSONSource | undefined)?.setData(data);
+    map.setLayoutProperty('recent-halo', 'visibility', recentEnabled ? 'visible' : 'none');
+  }, [ready, recentPoints, recentEnabled]);
 
   useEffect(() => {
     if (!focus || !mapRef.current) return;

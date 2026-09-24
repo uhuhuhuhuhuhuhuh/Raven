@@ -10,7 +10,8 @@ const LAYERS: Array<{ key: LayerKey; label: string; group: 'CAMERAS' | 'OVERLAYS
   { key: 'heat', label: 'HEATMAP', group: 'OVERLAYS', hint: 'Visible-contact density' },
   { key: 'scanOutline', label: 'SCAN OUTLINE', group: 'OVERLAYS', hint: 'Last queried viewport' },
   { key: 'fov', label: 'FIELD OF VIEW', group: 'OVERLAYS', hint: 'Approx. facing where tagged · z15+' },
-  { key: 'rings', label: 'RANGE RINGS', group: 'OVERLAYS', hint: 'Distance from reference origin' }
+  { key: 'rings', label: 'RANGE RINGS', group: 'OVERLAYS', hint: 'Distance from reference origin' },
+  { key: 'recent', label: 'NEWLY MAPPED', group: 'OVERLAYS', hint: 'Added to OSM since the last weekly extract' }
 ];
 
 export function LayerPanel({

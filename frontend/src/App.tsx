@@ -10,6 +10,7 @@ import { classLabel } from './labels';
 import { abortError } from './net';
 import { formatViewHash, parseViewHash } from './permalink';
 import { loadPreferences, savePreferences } from './preferences';
+import { loadOsmChanges, type OsmChanges } from './providers/osmTiles';
 import { providerById, providerPlan, ravenProviders } from './providers/registry';
 import { searchPlace } from './search';
 import {
@@ -60,6 +61,7 @@ export default function App() {
   const [clock, setClock] = useState(new Date());
   const [query, setQuery] = useState('');
   const [registerFilter, setRegisterFilter] = useState('');
+  const [osmChanges, setOsmChanges] = useState<OsmChanges | null>(null);
   const [activity, setActivity] = useState('READY');
   const [focus, setFocus] = useState<MapFocus>(null);
   const [mobilePanel, setMobilePanel] = useState<'none' | 'contacts' | 'layers' | 'log'>('none');
@@ -74,6 +76,7 @@ export default function App() {
     azimuth: bearingDegrees(state.referenceOrigin.lat, state.referenceOrigin.lon, feature.lat, feature.lon)
   })).sort((a, b) => a.distance - b.distance), [visible, state.referenceOrigin]);
   const selected = enriched.find(feature => feature.id === state.selectionId) || null;
+  const recentPoints = useMemo(() => osmChanges?.added.map(([, lat, lon]) => [lon, lat] as [number, number]) ?? [], [osmChanges]);
   const registerFeatures = useMemo(
     () => (registerFilter.trim() ? enriched.filter(feature => matchesFilter(feature, registerFilter)) : enriched),
     [enriched, registerFilter]
@@ -103,6 +106,17 @@ export default function App() {
       scanControllerRef.current?.abort();
       searchControllerRef.current?.abort();
     };
+  }, [addLog]);
+
+  // Weekly extract changes, when the deploy published them.
+  useEffect(() => {
+    let active = true;
+    void loadOsmChanges(STATIC_API_BASE).then(changes => {
+      if (!active || !changes) return;
+      setOsmChanges(changes);
+      addLog('OSM', `${changes.addedCount} CAMERAS NEWLY MAPPED SINCE ${changes.since?.slice(0, 10) ?? 'THE LAST EXTRACT'}`);
+    });
+    return () => { active = false; };
   }, [addLog]);
 
   useEffect(() => {
@@ -371,6 +385,8 @@ export default function App() {
           outlineEnabled={state.layers.scanOutline}
           fovEnabled={state.layers.fov}
           ringsEnabled={state.layers.rings}
+          recentPoints={recentPoints}
+          recentEnabled={state.layers.recent}
           focus={focus}
           onViewportChange={handleViewport}
           onSelect={id => dispatch({ type: 'SELECT', id })}
@@ -415,6 +431,14 @@ export default function App() {
           <ClassCount label="ALPR" value={mediaCounts.alpr} />
           <ClassCount label="FACING" value={mediaCounts.facing} />
         </section>
+        {osmChanges && (
+          <section className="analytics-card metric-card">
+            <div className="section-label">NEWLY MAPPED · OSM</div>
+            <strong>+{osmChanges.addedCount}</strong>
+            <small>{osmChanges.removedCount} REMOVED · {osmChanges.since?.slice(0, 10) ?? '—'} → {osmChanges.until?.slice(0, 10) ?? '—'}</small>
+            {osmChanges.feed && <a className="feed-link" href={new URL(`osm/${osmChanges.feed}`, STATIC_API_BASE).href}>ATOM FEED ↗</a>}
+          </section>
+        )}
         <MetricCard label="NEAREST" value={enriched[0] ? formatRange(enriched[0].distance) : '—'} sub={enriched[0] ? classLabel(enriched[0]) : 'NO VISIBLE CONTACT'} />
         <section className="analytics-card provider-health">
           <div className="section-label">PROVIDER HEALTH</div>
