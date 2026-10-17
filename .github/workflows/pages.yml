@@ -57,7 +57,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: osm-tiles
-          key: osm-tiles-us-${{ steps.osm-week.outputs.week }}
+          # The builder's hash is part of the key, so a changed script rebuilds this week's
+          # tiles; the broad restore key still supplies last week's build for changes.json.
+          key: osm-tiles-us-${{ hashFiles('scripts/build_osm_tiles.py') }}-${{ steps.osm-week.outputs.week }}
           restore-keys: osm-tiles-us-
       # Geofabrik's US extract (~11 GB) is streamed through osmium so only camera nodes
       # touch the disk, and fetched at most once a week thanks to the cache above. If this
