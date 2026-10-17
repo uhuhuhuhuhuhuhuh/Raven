@@ -20,7 +20,8 @@ function cameraType(tags: Record<string, string>): RavenFeature['cameraType'] {
   return 'unknown';
 }
 
-function normalizeElement(element: any): RavenFeature | null {
+/** A RavenFeature from an OSM node (Overpass element or an extract-tile record). */
+export function normalizeElement(element: any): RavenFeature | null {
   if (typeof element?.lat !== 'number' || typeof element?.lon !== 'number') return null;
   const tags = (element.tags || {}) as Record<string, string>;
   const address = [tags['addr:housenumber'], tags['addr:street'], tags['addr:city']].filter(Boolean).join(' ') || undefined;

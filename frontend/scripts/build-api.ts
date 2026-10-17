@@ -34,7 +34,7 @@ async function catalog(provider: RavenProvider): Promise<ProviderCatalogResult> 
   }
 }
 
-const OSM_ENDPOINTS: Record<string, string> = { osmTiles: 'osm/index.json', osmChanges: 'osm/changes.json', osmChangesFeed: 'osm/changes.atom' };
+const OSM_ENDPOINTS: Record<string, string> = { osmTiles: 'osm/index.json', osmVectorTiles: 'osm/cameras.pmtiles', osmChanges: 'osm/changes.json', osmChangesFeed: 'osm/changes.atom' };
 
 /** Lists the extract files (tiles, weekly changes, feed) that exist in this build. */
 async function osmEndpoints(): Promise<Record<string, string>> {

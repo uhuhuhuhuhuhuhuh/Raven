@@ -155,3 +155,36 @@ def test_cli_reads_the_previous_build_even_when_it_is_the_output_directory(tmp_p
     assert json.loads((out / "index.json").read_text())["changes"] == "changes.json"
     assert (out / "changes.atom").exists()
     assert "3 newly mapped, 1 removed" in capsys.readouterr().out
+
+
+def test_tile_properties_classify_and_compact_tags() -> None:
+    assert tiles.camera_class({"surveillance:type": "ALPR"}) == "alpr"
+    assert tiles.camera_class({"highway": "speed_camera"}) == "speed"
+    assert tiles.camera_class({"man_made": "surveillance"}) == "mapped"
+    assert tiles.parse_bearing("NE") == 45
+    assert tiles.parse_bearing("-90°") == 270
+    assert tiles.parse_bearing("forward") is None
+    props = tiles.tile_properties(7, {"man_made": "surveillance", "direction": "90", "operator": "City", "manufacturer": "Flock Safety", "description": "x" * 500})
+    assert props == {"id": 7, "k": "mapped", "b": 90, "op": "City", "mf": "Flock Safety"}
+
+
+def test_cli_writes_vector_tiles_when_tippecanoe_is_available(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    if not tiles.shutil.which("tippecanoe"):
+        pytest.skip("tippecanoe not installed")
+    pbf = write_pbf(tmp_path / "cams.osm.pbf")
+    out = tmp_path / "out"
+    assert tiles.main(["--pbf", str(pbf), "--out", str(out)]) == 0
+    index = json.loads((out / "index.json").read_text(encoding="utf-8"))
+    assert index["vectorTiles"] == "cameras.pmtiles"
+    assert (out / "cameras.pmtiles").stat().st_size > 100
+    assert "cameras.pmtiles" in capsys.readouterr().out
+
+
+def test_cli_skips_vector_tiles_without_tippecanoe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(tiles.shutil, "which", lambda name: None)
+    pbf = write_pbf(tmp_path / "cams.osm.pbf")
+    out = tmp_path / "out"
+    assert tiles.main(["--pbf", str(pbf), "--out", str(out)]) == 0
+    index = json.loads((out / "index.json").read_text(encoding="utf-8"))
+    assert "vectorTiles" not in index
+    assert not (out / "cameras.pmtiles").exists()

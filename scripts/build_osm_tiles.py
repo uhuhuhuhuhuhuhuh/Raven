@@ -14,6 +14,9 @@ entirely inside the extract's boundary, and uses Overpass everywhere else.
 The input may be a full extract or one already reduced with
 `osmium tags-filter ... n/man_made=surveillance n/highway=speed_camera` (as CI does).
 
+When tippecanoe is installed it also writes cameras.pmtiles, vector tiles the WebUI renders
+directly (clustered below zoom 14), so the map never has to download whole JSON tiles.
+
 With --previous pointing at the last build's output, it also writes changes.json (the
 cameras added to or removed from OpenStreetMap since then) and, given --site-url, an
 Atom feed of the newly mapped cameras. OSM changes record mapping activity: a newly
@@ -26,7 +29,9 @@ import argparse
 import json
 import math
 import shutil
+import subprocess
 import sys
+import tempfile
 import time
 from collections import defaultdict
 from dataclasses import dataclass
@@ -39,6 +44,10 @@ TILE_SIZE = 0.5  # degrees; must match frontend/src/providers/osmTiles.ts
 CAMERA_TAGS = (("man_made", "surveillance"), ("highway", "speed_camera"))
 LICENSE = "Open Database License (ODbL) 1.0 - © OpenStreetMap contributors"
 FEED_LIMIT = 500
+VECTOR_TILES = "cameras.pmtiles"
+# Marker classes the WebUI draws; must match cameraType() in frontend/src/providers/osm.ts.
+CLASSES = ("alpr", "speed", "mapped")
+COMPASS = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"]
 
 Camera = tuple[int, float, float, dict[str, str]]
 
@@ -141,6 +150,68 @@ def build_tiles(
     return index
 
 
+def camera_class(tags: dict[str, str]) -> str:
+    if tags.get("surveillance:type", "").lower() == "alpr":
+        return "alpr"
+    if tags.get("highway") == "speed_camera":
+        return "speed"
+    return "mapped"
+
+
+def parse_bearing(value: str | None) -> int | None:
+    """Degrees ("45", "45°") or a 16-point compass abbreviation ("NE"), normalised to 0–359."""
+    if not value:
+        return None
+    text = value.replace("°", "").strip()
+    try:
+        return round(float(text)) % 360
+    except ValueError:
+        pass
+    try:
+        return round(COMPASS.index(text.upper()) * 22.5) % 360
+    except ValueError:
+        return None
+
+
+def tile_properties(node_id: int, tags: dict[str, str]) -> dict[str, Any]:
+    """The few attributes the map needs per point; full tags stay in the JSON tiles."""
+    properties: dict[str, Any] = {"id": node_id, "k": camera_class(tags)}
+    bearing = parse_bearing(tags.get("camera:direction") or tags.get("direction"))
+    if bearing is not None:
+        properties["b"] = bearing
+    for key, tag in (("nm", "name"), ("op", "operator"), ("mf", "manufacturer")):
+        if tags.get(tag):
+            properties[key] = tags[tag][:80]
+    return properties
+
+
+def write_vector_tiles(cameras: list[Camera], out: Path) -> bool:
+    """Builds out/cameras.pmtiles with tippecanoe: one layer per marker class, points clustered
+    below zoom 14 so a national view renders from a few small tiles. False when tippecanoe
+    is not installed (the JSON tiles still work on their own)."""
+    tippecanoe = shutil.which("tippecanoe")
+    if not tippecanoe:
+        print("tippecanoe not found; skipping vector tiles", file=sys.stderr)
+        return False
+    with tempfile.TemporaryDirectory() as scratch:
+        files = {name: open(Path(scratch) / f"{name}.geojsonl", "w", encoding="utf-8") for name in CLASSES}
+        for node_id, lat, lon, tags in cameras:
+            feature = {"type": "Feature", "geometry": {"type": "Point", "coordinates": [lon, lat]}, "properties": tile_properties(node_id, tags)}
+            files[camera_class(tags)].write(json.dumps(feature, separators=(",", ":"), ensure_ascii=False) + "\n")
+        for handle in files.values():
+            handle.close()
+        command = [
+            tippecanoe, "--force", "--quiet", "-o", str(out / VECTOR_TILES),
+            "--minimum-zoom=0", "--maximum-zoom=14", "--drop-rate=1", "--cluster-distance=40", "--cluster-maxzoom=13",
+            "--no-feature-limit", "--no-tile-size-limit", "--use-attribute-for-id=id",
+            "--name=Raven cameras", f"--attribution={LICENSE}",
+        ]
+        for name in CLASSES:
+            command += ["-L", f"{name}:{Path(scratch) / f'{name}.geojsonl'}"]
+        subprocess.run(command, check=True)
+    return True
+
+
 def load_previous(previous: Path | None) -> tuple[dict[int, list[Any]], str | None] | None:
     """Camera records from an earlier build's output, keyed by node id; None when absent or unreadable."""
     if previous is None or not (previous / "index.json").exists():
@@ -230,6 +301,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, required=True, help="Output directory, e.g. frontend/dist/api/v1/osm")
     parser.add_argument("--previous", type=Path, help="Previous build's output directory, for changes.json")
     parser.add_argument("--site-url", help="Public site URL (e.g. https://user.github.io/Raven/) to write changes.atom")
+    parser.add_argument("--no-vector-tiles", action="store_true", help="Skip the tippecanoe vector-tile build")
     args = parser.parse_args(argv)
 
     cameras, data_timestamp, header_box = read_cameras(args.pbf)
@@ -242,7 +314,11 @@ def main(argv: list[str] | None = None) -> int:
     previous = load_previous(args.previous)  # read before --out is replaced, in case they are the same directory
     index = build_tiles(cameras, rings, args.source or args.pbf.name, data_timestamp, args.out)
     changes = write_changes(args.out, cameras, previous, data_timestamp, args.site_url)
-    print(f"{index['count']} cameras in {len(index['tiles'])} tiles (data as of {data_timestamp or 'unknown'}) -> {args.out}")
+    if not args.no_vector_tiles and write_vector_tiles(cameras, args.out):
+        index["vectorTiles"] = VECTOR_TILES
+        (args.out / "index.json").write_text(json.dumps(index, separators=(",", ":"), ensure_ascii=False), encoding="utf-8")
+    print(f"{index['count']} cameras in {len(index['tiles'])} tiles (data as of {data_timestamp or 'unknown'}) -> {args.out}"
+          + (f" + {VECTOR_TILES}" if "vectorTiles" in index else ""))
     print("No previous build: changes.json is a baseline." if changes["baseline"]
           else f"Since {changes['since']}: {changes['addedCount']} newly mapped, {changes['removedCount']} removed.")
     return 0

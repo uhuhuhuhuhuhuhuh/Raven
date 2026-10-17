@@ -1,126 +1,69 @@
 import { describe, expect, it } from 'vitest';
-import { allFeatures, createInitialState, ravenReducer, visibleFeatures } from './state';
+import { createInitialState, featureVisible, overallStatus, ravenReducer, visibleFeatures, type RavenState } from './state';
 import type { RavenFeature } from './types';
 
-const snapshot: RavenFeature = {
-  id: 'snapshot-1', providerId: 'fl511-public-cameras', kind: 'camera', cameraType: 'fixed', mediaType: 'snapshot',
-  name: 'Snapshot Camera', lat: 25.76, lon: -80.19, snapshotUrl: 'https://example.test/cam.jpg', fetchedAt: new Date().toISOString(), metadata: {}
-};
-const mapped: RavenFeature = {
-  id: 'mapped-1', providerId: 'osm-overpass', kind: 'camera', cameraType: 'fixed', mediaType: 'none',
-  name: 'Mapped Camera', lat: 25.77, lon: -80.18, fetchedAt: new Date().toISOString(), metadata: {}
-};
-const speed: RavenFeature = {
-  id: 'speed-1', providerId: 'osm-overpass', kind: 'camera', cameraType: 'speed', mediaType: 'none',
-  name: 'Speed Camera', lat: 25.78, lon: -80.17, fetchedAt: new Date().toISOString(), metadata: {}
-};
-const alpr: RavenFeature = {
-  id: 'alpr-1', providerId: 'osm-overpass', kind: 'camera', cameraType: 'alpr', mediaType: 'none', manufacturer: 'Flock Safety',
-  name: 'Plate Reader', lat: 25.79, lon: -80.16, fetchedAt: new Date().toISOString(), metadata: {}
-};
-const streamWithSnapshot: RavenFeature = {
-  id: 'stream-1', providerId: 'caltrans-cctv', kind: 'camera', cameraType: 'fixed', mediaType: 'stream',
-  name: 'Stream Camera', lat: 34.05, lon: -118.25, snapshotUrl: 'https://example.test/fallback.jpg',
-  streamPageUrl: 'https://cwwp2.dot.ca.gov/vm/loc/d7/test.htm', fetchedAt: new Date().toISOString(), metadata: {}
-};
+const base = (overrides: Partial<RavenFeature>): RavenFeature => ({
+  id: 'f', providerId: 'test', kind: 'camera', mediaType: 'none', lat: 25.76, lon: -80.19, fetchedAt: '2026-01-01T00:00:00Z', metadata: {}, ...overrides
+});
+const snapshot = base({ id: 'snap', providerId: 'fl511', mediaType: 'snapshot', snapshotUrl: 'https://example.test/a.jpg' });
+const stream = base({ id: 'live', providerId: 'caltrans', mediaType: 'stream', snapshotUrl: 'https://example.test/b.jpg', streamUrl: 'https://example.test/b.m3u8' });
+const mapped = base({ id: 'osm-node-1', providerId: 'osm-overpass', cameraType: 'fixed' });
+const speed = base({ id: 'osm-node-2', providerId: 'osm-overpass', cameraType: 'speed' });
+const alpr = base({ id: 'osm-node-3', providerId: 'osm-overpass', cameraType: 'alpr' });
 
-function loadedState() {
+function loaded(): RavenState {
   let state = createInitialState();
-  state = ravenReducer(state, {
-    type: 'SCAN_BEGIN', id: 'scan-a', bounds: state.viewport.bounds, center: state.viewport.center,
-    activeProviderIds: ['osm-overpass', 'fl511-public-cameras'],
-    allProviderIds: ['osm-overpass', 'fl511-public-cameras', 'caltrans-cctv'],
-    skipReasons: { 'caltrans-cctv': 'OUTSIDE COVERAGE' }, timestamp: 1
-  });
-  state = ravenReducer(state, { type: 'PROVIDER_SUCCESS', scanId: 'scan-a', providerId: 'osm-overpass', features: [mapped, speed, alpr], timestamp: 2 });
-  state = ravenReducer(state, { type: 'PROVIDER_SUCCESS', scanId: 'scan-a', providerId: 'fl511-public-cameras', features: [snapshot], timestamp: 2 });
-  state = ravenReducer(state, { type: 'SCAN_FINISH', scanId: 'scan-a', status: 'ready', timestamp: 3 });
+  state = ravenReducer(state, { type: 'DATA_SET', set: 'live', patch: { status: 'ready', source: 'catalog', features: [snapshot, stream] } });
+  state = ravenReducer(state, { type: 'DATA_SET', set: 'osm', patch: { status: 'ready', source: 'tiles', features: [mapped, speed, alpr] } });
   return state;
 }
 
-describe('Raven state invariants', () => {
-  it('hides snapshot layers without deleting fetched provider data', () => {
-    let state = loadedState();
-    expect(allFeatures(state)).toHaveLength(4);
-    expect(visibleFeatures(state).some(feature => feature.id === snapshot.id)).toBe(true);
-    state = ravenReducer(state, { type: 'LAYER_SET', layer: 'snapshots', value: false });
-    expect(allFeatures(state)).toHaveLength(4);
-    expect(visibleFeatures(state).some(feature => feature.id === snapshot.id)).toBe(false);
-    state = ravenReducer(state, { type: 'LAYER_SET', layer: 'snapshots', value: true });
-    expect(visibleFeatures(state).some(feature => feature.id === snapshot.id)).toBe(true);
-  });
-
-  it('marks results dirty when the viewport moves after a completed scan', () => {
-    let state = loadedState();
-    state = ravenReducer(state, {
-      type: 'VIEWPORT_CHANGED',
-      viewport: { ...state.viewport, bounds: { ...state.viewport.bounds, east: state.viewport.bounds.east + 0.02 } }
-    });
-    expect(state.scan.status).toBe('dirty');
-  });
-
-  it('ignores late provider results from an obsolete scan', () => {
-    let state = loadedState();
-    state = ravenReducer(state, {
-      type: 'SCAN_BEGIN', id: 'scan-b', bounds: state.viewport.bounds, center: state.viewport.center,
-      activeProviderIds: ['osm-overpass'], allProviderIds: ['osm-overpass', 'fl511-public-cameras', 'caltrans-cctv'], timestamp: 4
-    });
-    state = ravenReducer(state, { type: 'PROVIDER_SUCCESS', scanId: 'scan-a', providerId: 'osm-overpass', features: [mapped], timestamp: 5 });
-    expect(state.providers['osm-overpass'].scanId).toBe('scan-b');
-    expect(state.providers['osm-overpass'].features).toHaveLength(0);
-  });
-
-  it('keeps speed cameras independently controllable from the general mapped-camera layer', () => {
-    let state = loadedState();
-    state = ravenReducer(state, { type: 'LAYER_SET', layer: 'mappedCameras', value: false });
-    const visible = visibleFeatures(state);
-    expect(visible.some(feature => feature.id === mapped.id)).toBe(false);
-    expect(visible.some(feature => feature.id === speed.id)).toBe(true);
-  });
-
-  it('selection changes do not mutate viewport or scan bounds', () => {
-    const state = loadedState();
-    const next = ravenReducer(state, { type: 'SELECT', id: snapshot.id });
-    expect(next.viewport).toEqual(state.viewport);
-    expect(next.scan.bounds).toEqual(state.scan.bounds);
+describe('Raven state', () => {
+  it('hides snapshot layers without deleting loaded data', () => {
+    const state = ravenReducer(loaded(), { type: 'LAYER_TOGGLE', layer: 'snapshots' });
+    expect(visibleFeatures(state).map(feature => feature.id)).not.toContain('snap');
+    expect(state.live.features).toHaveLength(2);
+    expect(visibleFeatures(ravenReducer(state, { type: 'LAYER_TOGGLE', layer: 'snapshots' })).map(feature => feature.id)).toContain('snap');
   });
 
   it('shows a dual-capability stream camera when either its stream or snapshot layer is enabled', () => {
-    let state = loadedState();
-    state = ravenReducer(state, {
-      type: 'PROVIDER_SUCCESS', scanId: 'scan-a', providerId: 'caltrans-cctv', features: [streamWithSnapshot], timestamp: 4
-    });
-    state = ravenReducer(state, { type: 'LAYER_SET', layer: 'streams', value: false });
-    expect(visibleFeatures(state).some(feature => feature.id === streamWithSnapshot.id)).toBe(true);
-    state = ravenReducer(state, { type: 'LAYER_SET', layer: 'snapshots', value: false });
-    expect(visibleFeatures(state).some(feature => feature.id === streamWithSnapshot.id)).toBe(false);
-    state = ravenReducer(state, { type: 'LAYER_SET', layer: 'streams', value: true });
-    expect(visibleFeatures(state).some(feature => feature.id === streamWithSnapshot.id)).toBe(true);
+    const layers = loaded().layers;
+    expect(featureVisible(stream, { ...layers, streams: false })).toBe(true);
+    expect(featureVisible(stream, { ...layers, snapshots: false })).toBe(true);
+    expect(featureVisible(stream, { ...layers, streams: false, snapshots: false })).toBe(false);
   });
 
-  it('preserves progressive provider results while a provider is loading', () => {
-    let state = loadedState();
-    state = ravenReducer(state, {
-      type: 'SCAN_BEGIN', id: 'scan-c', bounds: state.viewport.bounds, center: state.viewport.center,
-      activeProviderIds: ['osm-overpass'], allProviderIds: ['osm-overpass'], timestamp: 10
-    });
-    state = ravenReducer(state, {
-      type: 'PROVIDER_PROGRESS', scanId: 'scan-c', providerId: 'osm-overpass', features: [mapped],
-      progress: { completed: 1, total: 4 }, timestamp: 11
-    });
-    expect(state.providers['osm-overpass'].status).toBe('loading');
-    expect(state.providers['osm-overpass'].features).toEqual([mapped]);
-    expect(state.providers['osm-overpass'].progress).toEqual({ completed: 1, total: 4 });
+  it('controls speed cameras and plate readers independently of other mapped cameras', () => {
+    const layers = loaded().layers;
+    expect(featureVisible(speed, { ...layers, mappedCameras: false })).toBe(true);
+    expect(featureVisible(speed, { ...layers, speedCameras: false })).toBe(false);
+    expect(featureVisible(alpr, { ...layers, mappedCameras: false, speedCameras: false })).toBe(true);
+    expect(featureVisible(alpr, { ...layers, alpr: false })).toBe(false);
+    expect(featureVisible(mapped, { ...layers, alpr: false, speedCameras: false })).toBe(true);
   });
 
-  it('controls plate readers (ALPR) independently of other mapped cameras', () => {
-    let state = loadedState();
-    state = ravenReducer(state, { type: 'LAYER_SET', layer: 'alpr', value: false });
-    expect(visibleFeatures(state).some(feature => feature.id === alpr.id)).toBe(false);
-    expect(visibleFeatures(state).some(feature => feature.id === mapped.id)).toBe(true);
-    state = ravenReducer(state, { type: 'LAYER_SET', layer: 'alpr', value: true });
-    state = ravenReducer(state, { type: 'LAYER_SET', layer: 'mappedCameras', value: false });
-    expect(visibleFeatures(state).some(feature => feature.id === alpr.id)).toBe(true);
-    expect(visibleFeatures(state).some(feature => feature.id === mapped.id)).toBe(false);
+  it('measures from the map centre until a GPS origin is chosen', () => {
+    const viewport = { center: { lat: 34.05, lon: -118.25 }, bounds: { west: -118.3, south: 34, east: -118.2, north: 34.1 }, zoom: 13 };
+    const followed = ravenReducer(createInitialState(), { type: 'VIEWPORT_CHANGED', viewport });
+    expect(followed.referenceOrigin).toEqual({ lat: 34.05, lon: -118.25, source: 'map' });
+    const pinned = ravenReducer(followed, { type: 'REFERENCE_ORIGIN_SET', point: { lat: 1, lon: 2 }, source: 'gps' });
+    const moved = ravenReducer(pinned, { type: 'VIEWPORT_CHANGED', viewport: { ...viewport, center: { lat: 35, lon: -119 } } });
+    expect(moved.referenceOrigin).toEqual({ lat: 1, lon: 2, source: 'gps' });
+  });
+
+  it('selection changes do not touch the viewport or data', () => {
+    const state = loaded();
+    const selected = ravenReducer(state, { type: 'SELECT', id: 'snap' });
+    expect(selected.viewport).toBe(state.viewport);
+    expect(selected.live).toBe(state.live);
+    expect(selected.selectionId).toBe('snap');
+  });
+
+  it('summarises the two data sets for the status pill', () => {
+    const state = loaded();
+    expect(overallStatus(state)).toBe('ready');
+    expect(overallStatus(ravenReducer(state, { type: 'DATA_SET', set: 'osm', patch: { status: 'loading' } }))).toBe('loading');
+    expect(overallStatus(ravenReducer(state, { type: 'DATA_SET', set: 'osm', patch: { status: 'error' } }))).toBe('partial');
+    expect(overallStatus(ravenReducer(ravenReducer(state, { type: 'DATA_SET', set: 'osm', patch: { status: 'error' } }), { type: 'DATA_SET', set: 'live', patch: { status: 'error' } }))).toBe('error');
   });
 });

@@ -15,6 +15,8 @@ export type OsmTileIndex = {
   count: number;
   tiles: string[];
   coverage: Array<{ hole: boolean; points: Array<[number, number]> }>;
+  /** File name of the PMTiles vector tiles beside the index, when the build produced them. */
+  vectorTiles?: string;
 };
 
 export type OsmElement = { type: 'node'; id: number; lat: number; lon: number; tags: Record<string, string> };

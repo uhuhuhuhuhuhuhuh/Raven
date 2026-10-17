@@ -71,12 +71,8 @@ export type ProviderRun = {
   skipReason?: string;
 };
 
-export type LayerKey = 'mappedCameras' | 'snapshots' | 'streams' | 'speedCameras' | 'alpr' | 'heat' | 'scanOutline' | 'fov' | 'rings' | 'recent';
+export type LayerKey = 'mappedCameras' | 'snapshots' | 'streams' | 'speedCameras' | 'alpr' | 'heat' | 'fov' | 'rings' | 'recent';
 
-export type RavenLogEntry = {
-  id: string;
-  timestamp: number;
-  level: 'info' | 'warn' | 'error';
-  channel: string;
-  message: string;
-};
+/** How a data set is doing: loading, complete, usable but incomplete, or failed. */
+export type DataStatus = 'idle' | 'loading' | 'ready' | 'partial' | 'error';
+

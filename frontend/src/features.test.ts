@@ -64,20 +64,20 @@ describe('stored preferences', () => {
 
   it('round-trips known layer choices and auto scan', () => {
     const storage = memoryStorage();
-    savePreferences({ layers: { heat: true, fov: false }, autoScan: true }, storage);
-    expect(loadPreferences(layers, storage)).toEqual({ layers: { heat: true, fov: false }, autoScan: true });
+    savePreferences({ layers: { heat: true, fov: false } }, storage);
+    expect(loadPreferences(layers, storage)).toEqual({ layers: { heat: true, fov: false } });
   });
 
   it('ignores corrupt JSON, unknown layers and non-boolean values', () => {
     expect(loadPreferences(layers, memoryStorage({ 'raven.preferences.v1': '{not json' }))).toEqual({});
     const stale = memoryStorage({ 'raven.preferences.v1': JSON.stringify({ layers: { heat: 'yes', removed: true, fov: true }, autoScan: 1 }) });
-    expect(loadPreferences(layers, stale)).toEqual({ layers: { fov: true }, autoScan: undefined });
+    expect(loadPreferences(layers, stale)).toEqual({ layers: { fov: true } });
   });
 
   it('survives storage that throws, as in privacy modes', () => {
     const throwing = { getItem: () => { throw new Error('blocked'); }, setItem: () => { throw new Error('quota'); } };
     expect(loadPreferences(layers, throwing)).toEqual({});
-    expect(() => savePreferences({ autoScan: true }, throwing)).not.toThrow();
+    expect(() => savePreferences({ layers: { heat: true } }, throwing)).not.toThrow();
   });
 });
 
