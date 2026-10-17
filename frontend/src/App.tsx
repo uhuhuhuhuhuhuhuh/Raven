@@ -1,33 +1,15 @@
 import { FormEvent, useCallback, useEffect, useMemo, useReducer, useRef, useState, type ComponentType } from 'react';
 import {
-  Activity,
-  ArrowRight,
-  Crosshair,
-  Database,
-  Download,
-  Eye,
-  ExternalLink,
-  Filter,
-  Layers,
-  List,
-  LocateFixed,
-  MapPinPlus,
-  PencilLine,
-  Radar,
-  RefreshCw,
-  Rss,
-  Search,
-  Target,
-  TerminalSquare,
-  Trash2,
-  X
+  Activity, ArrowRight, Check, Database, Download, ExternalLink, Eye, Filter, Layers, Link2, List, LocateFixed, MapPinPlus, PencilLine, Radar, Search, Target, X, ZoomIn
 } from 'lucide-react';
-import { clearProviderCache, getCachedProviderScan, putCachedProviderScan } from './cache';
 import { CameraViewer } from './components/CameraViewer';
 import { LayerPanel } from './components/LayerPanel';
 import { MarkerSwatch } from './components/MarkerSwatch';
-import { RavenMap, type MapFocus } from './components/RavenMap';
+import { OSM_LIST_ZOOM, RavenMap, type MapFocus, type OsmViewSummary } from './components/RavenMap';
 import { VirtualContactList, type EnrichedFeature } from './components/VirtualContactList';
+import { boundsContain, filterByBounds, padBounds } from './data/bounds';
+import { loadCatalog, type Catalog } from './data/catalog';
+import { osmVectorUrl } from './data/osmVector';
 import { downloadGeoJson, featuresToGeoJson } from './exportGeoJson';
 import { matchesFilter } from './filter';
 import { bearingDegrees, distanceMeters, formatRange } from './geo';
@@ -36,35 +18,25 @@ import { abortError } from './net';
 import { osmAddUrl, osmEditUrl } from './osmLinks';
 import { formatViewHash, parseViewHash } from './permalink';
 import { loadPreferences, savePreferences } from './preferences';
-import { loadOsmChanges, type OsmChanges } from './providers/osmTiles';
-import { providerById, providerPlan, ravenProviders } from './providers/registry';
+import { normalizeElement, osmProvider } from './providers/osm';
+import { loadOsmChanges, loadTileElements, loadTileIndex, type OsmChanges, type OsmTileIndex } from './providers/osmTiles';
+import { providerById, ravenProviders } from './providers/registry';
+import { providerEligibility, type RavenProvider } from './providers/types';
 import { searchPlace } from './search';
-import {
-  allFeatures,
-  createInitialState,
-  DEFAULT_VIEW,
-  LAYER_KEYS,
-  logEntry,
-  ravenReducer,
-  visibleFeatures
-} from './state';
-import type { LayerKey, ProviderRun, RavenFeature, RavenLogEntry, RavenMode, RavenViewport } from './types';
+import { allFeatures, createInitialState, DEFAULT_VIEW, featureVisible, LAYER_KEYS, overallStatus, ravenReducer, type DataSet } from './state';
+import type { DataStatus, RavenBounds, RavenFeature, RavenMode, RavenViewport } from './types';
 
-// Raven's static API (camera catalog, OSM extract tiles) sits beside the app on Pages and in Raven Local.
+// Raven's static API (camera catalog, OSM tiles) sits beside the app on Pages and in Raven Local.
 const STATIC_API_BASE = new URL('api/v1/', document.baseURI).href;
-
-function scanId() {
-  return globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-}
+/** Provider requests (used only without published data) cover this much more than the view, so small pans are free. */
+const PROVIDER_PADDING = 0.35;
+const CATALOG_PADDING = 0.1;
 
 async function detectMode(): Promise<RavenMode> {
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), 1100);
   try {
-    const response = await fetch(`${window.location.origin}/api/health`, {
-      signal: controller.signal,
-      headers: { Accept: 'application/json' }
-    });
+    const response = await fetch(`${window.location.origin}/api/health`, { signal: controller.signal, headers: { Accept: 'application/json' } });
     if (!response.ok) return 'static';
     const payload = await response.json();
     return payload?.service === 'raven' ? 'local' : 'static';
@@ -75,40 +47,55 @@ async function detectMode(): Promise<RavenMode> {
   }
 }
 
+function osmAttributionFor(index: OsmTileIndex | null): string {
+  if (!index) return '© OpenStreetMap contributors';
+  return `© OpenStreetMap contributors · ${index.source}${index.dataTimestamp ? `, data as of ${index.dataTimestamp.slice(0, 10)}` : ''}`;
+}
+
 export default function App() {
   // A shared #map=zoom/lat/lon link opens on that view; saved layer choices are restored.
   const [initialView] = useState(() => parseViewHash(window.location.hash) ?? DEFAULT_VIEW);
-  const [state, dispatch] = useReducer(ravenReducer, undefined, () => {
-    const saved = loadPreferences(LAYER_KEYS);
-    return createInitialState(initialView, saved.layers, saved.autoScan);
-  });
-  const [clock, setClock] = useState(new Date());
+  const [state, dispatch] = useReducer(ravenReducer, undefined, () => createInitialState(initialView, loadPreferences(LAYER_KEYS).layers));
   const [query, setQuery] = useState('');
   const [registerFilter, setRegisterFilter] = useState('');
   const [osmChanges, setOsmChanges] = useState<OsmChanges | null>(null);
-  const [activity, setActivity] = useState('READY');
+  const [osmIndex, setOsmIndex] = useState<OsmTileIndex | null>(null);
+  const [osmEstimate, setOsmEstimate] = useState(0);
+  const [dataReady, setDataReady] = useState(false);
+  const [activity, setActivity] = useState<'READY' | 'SEARCHING' | 'LOCATING'>('READY');
+  const [notice, setNotice] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
   const [focus, setFocus] = useState<MapFocus>(null);
   const [mobilePanel, setMobilePanel] = useState<'none' | 'contacts' | 'side'>('none');
   const [sideTab, setSideTab] = useState<SideTab>('overview');
-  // Scans wait for the map's first real viewport; before that the bounds are a placeholder.
   const [mapReady, setMapReady] = useState(false);
-  const scanControllerRef = useRef<AbortController | null>(null);
+  // A camera clicked on the map before it reached the list, and its full OSM record once fetched.
+  const [pinned, setPinned] = useState<RavenFeature | null>(null);
+  const [detail, setDetail] = useState<RavenFeature | null>(null);
+  const catalogRef = useRef<Catalog | null>(null);
+  const providerControllers = useRef<Record<'live' | 'osm', AbortController | null>>({ live: null, osm: null });
   const searchControllerRef = useRef<AbortController | null>(null);
 
-  const fetched = useMemo(() => allFeatures(state), [state]);
-  const visible = useMemo(() => visibleFeatures(state), [state]);
+  const osmTilesUrl = osmVectorUrl(STATIC_API_BASE, osmIndex);
+  const osmAttribution = osmAttributionFor(osmIndex);
+
+  const loaded = useMemo(() => {
+    const list = allFeatures(state);
+    return pinned && !list.some(feature => feature.id === pinned.id) ? [...list, pinned] : list;
+  }, [state, pinned]);
+  const visible = useMemo(() => loaded.filter(feature => featureVisible(feature, state.layers)), [loaded, state.layers]);
   const enriched = useMemo<EnrichedFeature[]>(() => visible.map(feature => ({
     ...feature,
     distance: distanceMeters(state.referenceOrigin.lat, state.referenceOrigin.lon, feature.lat, feature.lon),
     azimuth: bearingDegrees(state.referenceOrigin.lat, state.referenceOrigin.lon, feature.lat, feature.lon)
   })).sort((a, b) => a.distance - b.distance), [visible, state.referenceOrigin]);
-  const selected = enriched.find(feature => feature.id === state.selectionId) || null;
+  const selectedBase = enriched.find(feature => feature.id === state.selectionId) || null;
+  const selected = selectedBase && detail?.id === selectedBase.id ? { ...selectedBase, ...detail } : selectedBase;
   const recentPoints = useMemo(() => osmChanges?.added.map(([, lat, lon]) => [lon, lat] as [number, number]) ?? [], [osmChanges]);
   const registerFeatures = useMemo(
     () => (registerFilter.trim() ? enriched.filter(feature => matchesFilter(feature, registerFilter)) : enriched),
     [enriched, registerFilter]
   );
-
   const classCounts = useMemo(() => {
     const counts: Record<MarkerKey, number> = { stream: 0, snapshot: 0, alpr: 0, speed: 0, mapped: 0 };
     for (const feature of visible) counts[markerKey(feature)] += 1;
@@ -116,37 +103,144 @@ export default function App() {
   }, [visible]);
   const facingCount = useMemo(() => visible.filter(feature => feature.bearing !== undefined).length, [visible]);
 
-  const addLog = useCallback((channel: string, message: string, level: 'info' | 'warn' | 'error' = 'info') => {
-    dispatch({ type: 'LOG', entry: logEntry(channel, message, level) });
-  }, []);
-
-  useEffect(() => {
-    detectMode().then(mode => {
-      dispatch({ type: 'MODE_SET', mode });
-      addLog('MODE', mode === 'local' ? 'LOCAL FASTAPI DETECTED' : 'STATIC GITHUB PAGES MODE');
-    });
-    const timer = window.setInterval(() => setClock(new Date()), 1000);
-    return () => {
-      window.clearInterval(timer);
-      scanControllerRef.current?.abort();
-      searchControllerRef.current?.abort();
-    };
-  }, [addLog]);
-
-  // Weekly extract changes, when the deploy published them.
+  // ---- Data: published catalog and tiles first, on-demand providers as the fallback -------
   useEffect(() => {
     let active = true;
-    void loadOsmChanges(STATIC_API_BASE).then(changes => {
-      if (!active || !changes) return;
-      setOsmChanges(changes);
-      addLog('OSM', `${changes.addedCount} CAMERAS NEWLY MAPPED SINCE ${changes.since?.slice(0, 10) ?? 'THE LAST EXTRACT'}`);
+    void detectMode().then(mode => active && dispatch({ type: 'MODE_SET', mode }));
+    void loadOsmChanges(STATIC_API_BASE).then(changes => active && changes && setOsmChanges(changes));
+    void Promise.all([loadTileIndex(STATIC_API_BASE), loadCatalog(STATIC_API_BASE)]).then(([index, catalog]) => {
+      if (!active) return;
+      setOsmIndex(index);
+      catalogRef.current = catalog;
+      dispatch({
+        type: 'DATA_SET',
+        set: 'live',
+        patch: catalog ? { source: 'catalog', status: 'ready', generatedAt: catalog.generatedAt, features: [] } : { source: 'providers', status: 'idle' }
+      });
+      dispatch({
+        type: 'DATA_SET',
+        set: 'osm',
+        patch: index?.vectorTiles ? { source: 'tiles', status: 'loading', generatedAt: index.dataTimestamp } : { source: 'providers', status: 'idle', generatedAt: index?.dataTimestamp ?? null }
+      });
+      setDataReady(true);
     });
-    return () => { active = false; };
-  }, [addLog]);
+    const controllers = providerControllers.current;
+    return () => {
+      active = false;
+      searchControllerRef.current?.abort();
+      for (const controller of Object.values(controllers)) controller?.abort();
+    };
+  }, []);
+
+  // The catalog is in memory: each move is a filter, not a request.
+  useEffect(() => {
+    const catalog = catalogRef.current;
+    if (!catalog || state.live.source !== 'catalog') return;
+    dispatch({ type: 'DATA_SET', set: 'live', patch: { features: filterByBounds(catalog.features, padBounds(state.viewport.bounds, CATALOG_PADDING)), bounds: state.viewport.bounds } });
+  }, [state.viewport.bounds, state.live.source]);
+
+  const runProviders = useCallback(async (set: 'live' | 'osm', providers: RavenProvider[], viewport: RavenViewport, mode: RavenMode) => {
+    providerControllers.current[set]?.abort();
+    const controller = new AbortController();
+    providerControllers.current[set] = controller;
+    const bounds = padBounds(viewport.bounds, PROVIDER_PADDING);
+    const eligible = providers.filter(provider => providerEligibility(provider, bounds, viewport.zoom).active);
+    const skipped = providers.filter(provider => !eligible.includes(provider)).map(provider => providerEligibility(provider, bounds, viewport.zoom).reason);
+    if (!eligible.length) {
+      dispatch({ type: 'DATA_SET', set, patch: { status: 'idle', bounds: undefined, features: [], warning: skipped[0] ? `Zoom in to load (${skipped[0].toLowerCase()})` : undefined, error: undefined } });
+      return;
+    }
+    dispatch({ type: 'DATA_SET', set, patch: { status: 'loading', warning: undefined, error: undefined } });
+    const collected = new Map<string, RavenFeature[]>();
+    const publish = () => dispatch({ type: 'DATA_SET', set, patch: { features: Array.from(collected.values()).flat() } });
+    const outcomes = await Promise.all(eligible.map(async provider => {
+      try {
+        const result = await provider.scan({
+          mode,
+          bounds,
+          zoom: viewport.zoom,
+          staticApiBase: STATIC_API_BASE,
+          onProgress: features => {
+            if (controller.signal.aborted) return;
+            collected.set(provider.id, features);
+            publish();
+          }
+        }, controller.signal);
+        collected.set(provider.id, result.features);
+        return { warning: result.warning };
+      } catch (error) {
+        if (controller.signal.aborted || abortError(error)) return { aborted: true };
+        return { error: error instanceof Error ? error.message : `${provider.name} failed` };
+      }
+    }));
+    if (controller.signal.aborted) return;
+    const errors = outcomes.filter(outcome => outcome.error).map(outcome => outcome.error as string);
+    const warnings = outcomes.filter(outcome => outcome.warning).map(outcome => outcome.warning as string);
+    const status: DataStatus = errors.length === eligible.length ? 'error' : errors.length || warnings.length ? 'partial' : 'ready';
+    dispatch({ type: 'DATA_SET', set, patch: { status, bounds, features: Array.from(collected.values()).flat(), warning: warnings[0], error: errors[0] } });
+  }, []);
+
+  // Without published data, ask the providers for the area around the view, and again only
+  // once the view leaves that area.
+  const { mode, viewport, live, osm } = state;
+  useEffect(() => {
+    if (!dataReady || !mapReady || mode === 'detecting') return;
+    const timer = window.setTimeout(() => {
+      for (const [set, data] of [['live', live], ['osm', osm]] as const) {
+        if (data.source !== 'providers' || data.status === 'loading') continue;
+        if (data.bounds && boundsContain(data.bounds, viewport.bounds)) continue;
+        const providers = set === 'osm' ? [osmProvider] : ravenProviders.filter(provider => provider.id !== osmProvider.id);
+        void runProviders(set, providers, viewport, mode);
+      }
+    }, 600);
+    return () => window.clearTimeout(timer);
+  }, [dataReady, mapReady, mode, viewport, live, osm, runProviders]);
+
+  const lastOsmView = useRef<string | null>(null);
+  const handleOsmView = useCallback((summary: OsmViewSummary) => {
+    if (summary.estimate < 0) {
+      dispatch({ type: 'DATA_SET', set: 'osm', patch: { status: 'error', error: 'The OpenStreetMap tiles could not be loaded' } });
+      return;
+    }
+    setOsmEstimate(summary.estimate);
+    // The map settles often; only a changed set of cameras is worth a render.
+    const signature = summary.features.map(feature => feature.id).join(',');
+    if (signature === lastOsmView.current) return;
+    lastOsmView.current = signature;
+    dispatch({ type: 'DATA_SET', set: 'osm', patch: { status: 'ready', features: summary.features, error: undefined } });
+  }, []);
+
+  // ---- Selection: tile points carry a few fields; the full OSM record is fetched on demand -
+  const select = useCallback((id: string | null, feature?: RavenFeature) => {
+    dispatch({ type: 'SELECT', id });
+    setPinned(feature ?? null);
+    setDetail(null);
+  }, []);
+
+  const loadedRef = useRef(loaded);
+  loadedRef.current = loaded;
+  useEffect(() => {
+    const target = loadedRef.current.find(feature => feature.id === state.selectionId);
+    const index = osmIndex;
+    if (!target || !index || target.providerId !== 'osm-overpass' || Object.keys(target.metadata).length) return;
+    const controller = new AbortController();
+    const nodeId = Number(target.sourceId);
+    // Tile coordinates are quantised to a few metres, so look a little around the point and match by id.
+    const around: RavenBounds = { west: target.lon - 0.001, east: target.lon + 0.001, south: target.lat - 0.001, north: target.lat + 0.001 };
+    void loadTileElements(index, STATIC_API_BASE, around, controller.signal, elements => {
+      const element = elements.find(item => item.id === nodeId);
+      const full = element ? normalizeElement(element) : null;
+      if (full && !controller.signal.aborted) setDetail({ ...full, attribution: osmAttributionFor(index) });
+    }).catch(() => undefined);
+    return () => controller.abort();
+  }, [state.selectionId, osmIndex]);
 
   useEffect(() => {
-    savePreferences({ layers: state.layers, autoScan: state.autoScan });
-  }, [state.layers, state.autoScan]);
+    if (state.selectionId && !visible.some(feature => feature.id === state.selectionId)) select(null);
+  }, [state.selectionId, visible, select]);
+
+  // ---- Shell ----------------------------------------------------------------------------------
+  useEffect(() => savePreferences({ layers: state.layers }), [state.layers]);
 
   // Keep the address bar pointing at the current view so it can be bookmarked or shared.
   useEffect(() => {
@@ -168,142 +262,17 @@ export default function App() {
       if (event.key !== 'Escape' || event.defaultPrevented) return;
       if (event.target instanceof HTMLElement && event.target.closest('input, select, textarea')) return;
       if (mobilePanel !== 'none') setMobilePanel('none');
-      else if (state.selectionId) dispatch({ type: 'SELECT', id: null });
+      else if (state.selectionId) select(null);
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [mobilePanel, state.selectionId]);
+  }, [mobilePanel, state.selectionId, select]);
 
   useEffect(() => {
-    if (state.selectionId && !visible.some(feature => feature.id === state.selectionId)) {
-      dispatch({ type: 'SELECT', id: null });
-    }
-  }, [state.selectionId, visible]);
-
-  const runScan = useCallback(async (reason: 'manual' | 'auto' = 'manual') => {
-    if (state.mode === 'detecting' || !mapReady) return;
-    scanControllerRef.current?.abort();
-    const controller = new AbortController();
-    scanControllerRef.current = controller;
-    const id = scanId();
-    const plan = providerPlan(state.viewport.bounds, state.viewport.zoom);
-    const activeIds = plan.active.map(provider => provider.id);
-    const allIds = ravenProviders.map(provider => provider.id);
-    const startedAt = Date.now();
-
-    dispatch({
-      type: 'SCAN_BEGIN',
-      id,
-      bounds: state.viewport.bounds,
-      center: state.viewport.center,
-      activeProviderIds: activeIds,
-      allProviderIds: allIds,
-      skipReasons: plan.skipped,
-      timestamp: startedAt
-    });
-    setActivity('SCANNING');
-    addLog('SCAN', `${reason.toUpperCase()} · ${activeIds.join(' + ') || 'NO ELIGIBLE PROVIDERS'} · z${state.viewport.zoom.toFixed(1)}`);
-
-    const results = await Promise.all(plan.active.map(async provider => {
-      let cachedFeatures: RavenFeature[] | null = null;
-      let cachedPages: number | undefined;
-      let progressFeatures: RavenFeature[] = [];
-      const cacheTtl = provider.cacheTtlMs ?? 5 * 60 * 1000;
-
-      try {
-        const cached = await getCachedProviderScan(provider.id, state.viewport.bounds, cacheTtl);
-        if (cached && !controller.signal.aborted && scanControllerRef.current === controller) {
-          cachedFeatures = cached.features;
-          cachedPages = cached.pages;
-          dispatch({
-            type: 'PROVIDER_PROGRESS',
-            scanId: id,
-            providerId: provider.id,
-            features: cached.features,
-            progress: { completed: 0, total: 1 },
-            pages: cached.pages,
-            fromCache: true,
-            timestamp: Date.now()
-          });
-          addLog(provider.id.toUpperCase(), `${cached.features.length} CONTACTS RESTORED FROM CACHE`);
-        }
-      } catch {
-        // Cache is an optimization. Network scanning continues normally.
-      }
-
-      try {
-        const result = await provider.scan({
-          mode: state.mode,
-          bounds: state.viewport.bounds,
-          zoom: state.viewport.zoom,
-          staticApiBase: STATIC_API_BASE,
-          onProgress: (features, progress) => {
-            if (controller.signal.aborted || scanControllerRef.current !== controller) return;
-            progressFeatures = features;
-            dispatch({
-              type: 'PROVIDER_PROGRESS',
-              scanId: id,
-              providerId: provider.id,
-              features,
-              progress,
-              pages: progress.completed,
-              timestamp: Date.now()
-            });
-          }
-        }, controller.signal);
-        if (controller.signal.aborted || scanControllerRef.current !== controller) return { providerId: provider.id, status: 'aborted' as const };
-        dispatch({
-          type: 'PROVIDER_SUCCESS',
-          scanId: id,
-          providerId: provider.id,
-          features: result.features,
-          pages: result.pages,
-          warning: result.warning,
-          timestamp: Date.now()
-        });
-        // Only complete results are cached, so a later restore never passes off a partial scan as whole.
-        if (!result.warning) void putCachedProviderScan(provider.id, state.viewport.bounds, result.features, result.pages);
-        const summary = `${result.features.length} CONTACTS${result.pages && result.pages > 1 ? ` · ${result.pages} TILES/PAGES` : ''}`;
-        addLog(provider.id.toUpperCase(), result.warning ? `${summary} · ${result.warning}` : summary, result.warning ? 'warn' : 'info');
-        return { providerId: provider.id, status: result.warning ? 'incomplete' as const : 'ready' as const, count: result.features.length };
-      } catch (error) {
-        if (controller.signal.aborted || abortError(error)) return { providerId: provider.id, status: 'aborted' as const };
-        const message = error instanceof Error ? error.message : 'Provider scan failed';
-        if (cachedFeatures) {
-          dispatch({
-            type: 'PROVIDER_SUCCESS',
-            scanId: id,
-            providerId: provider.id,
-            features: cachedFeatures,
-            pages: cachedPages,
-            warning: `NETWORK REFRESH FAILED · CACHED DATA SHOWN · ${message}`,
-            fromCache: true,
-            timestamp: Date.now()
-          });
-          addLog(provider.id.toUpperCase(), `NETWORK FAILED · USING CACHED DATA · ${message}`, 'warn');
-          return { providerId: provider.id, status: 'cached' as const };
-        }
-        // Keep whatever already streamed in rather than clearing contacts the user is looking at.
-        dispatch({ type: 'PROVIDER_ERROR', scanId: id, providerId: provider.id, error: message, features: progressFeatures, timestamp: Date.now() });
-        addLog(provider.id.toUpperCase(), progressFeatures.length ? `${message} · KEPT ${progressFeatures.length} PARTIAL CONTACTS` : message, 'error');
-        return { providerId: provider.id, status: progressFeatures.length ? 'incomplete' as const : 'error' as const };
-      }
-    }));
-
-    if (controller.signal.aborted || scanControllerRef.current !== controller) return;
-    const usable = results.filter(result => result.status === 'ready' || result.status === 'cached' || result.status === 'incomplete').length;
-    const degraded = results.filter(result => result.status === 'error' || result.status === 'cached' || result.status === 'incomplete').length;
-    const finalStatus = usable === 0 && degraded > 0 ? 'error' : degraded > 0 ? 'partial' : 'ready';
-    dispatch({ type: 'SCAN_FINISH', scanId: id, status: finalStatus, timestamp: Date.now() });
-    setActivity('READY');
-    addLog('SCAN', finalStatus === 'partial' ? 'COMPLETE WITH DEGRADED PROVIDERS' : finalStatus === 'error' ? 'FAILED' : 'COMPLETE', finalStatus === 'error' ? 'error' : finalStatus === 'partial' ? 'warn' : 'info');
-  }, [state.mode, mapReady, state.viewport.bounds, state.viewport.center, state.viewport.zoom, addLog]);
-
-  useEffect(() => {
-    if (!state.autoScan || state.mode === 'detecting' || state.scan.status !== 'dirty') return;
-    const timer = window.setTimeout(() => void runScan('auto'), 800);
+    if (!notice) return;
+    const timer = window.setTimeout(() => setNotice(null), 4000);
     return () => window.clearTimeout(timer);
-  }, [state.autoScan, state.mode, state.scan.status, state.viewport.bounds, runScan]);
+  }, [notice]);
 
   const handleViewport = useCallback((viewport: RavenViewport) => {
     setMapReady(true);
@@ -319,19 +288,22 @@ export default function App() {
     setActivity('SEARCHING');
     try {
       const result = await searchPlace(state.mode, query.trim(), controller.signal);
-      if (!result) throw new Error('No matching location');
-      addLog('SEARCH', result.label.toUpperCase().slice(0, 72));
+      if (!result) throw new Error('No matching place');
       setFocus({ lat: result.lat, lon: result.lon, zoom: 14, token: Date.now() });
     } catch (error) {
-      if (!abortError(error)) addLog('SEARCH', error instanceof Error ? error.message : 'Search failed', 'error');
+      if (!abortError(error)) setNotice(error instanceof Error ? error.message : 'Search failed');
     } finally {
       if (!controller.signal.aborted) setActivity('READY');
     }
   }
 
-  function setGpsOrigin() {
+  function toggleGpsOrigin() {
+    if (state.referenceOrigin.source === 'gps') {
+      dispatch({ type: 'REFERENCE_ORIGIN_SET', point: state.viewport.center, source: 'map' });
+      return;
+    }
     if (!navigator.geolocation) {
-      addLog('GPS', 'GEOLOCATION UNAVAILABLE', 'error');
+      setNotice('This browser has no location support');
       return;
     }
     setActivity('LOCATING');
@@ -339,45 +311,38 @@ export default function App() {
       const point = { lat: position.coords.latitude, lon: position.coords.longitude };
       dispatch({ type: 'REFERENCE_ORIGIN_SET', point, source: 'gps' });
       setFocus({ ...point, zoom: 15, token: Date.now() });
-      addLog('GPS', 'REFERENCE ORIGIN UPDATED');
       setActivity('READY');
     }, error => {
-      addLog('GPS', error.message || 'PERMISSION DENIED / UNAVAILABLE', 'error');
+      setNotice(error.message || 'Location unavailable');
       setActivity('READY');
     }, { enableHighAccuracy: true, timeout: 8000 });
   }
 
-  function setScanOrigin() {
-    const point = state.scan.center || state.viewport.center;
-    dispatch({ type: 'REFERENCE_ORIGIN_SET', point, source: 'scan' });
-    addLog('ORIGIN', 'DISTANCE / AZIMUTH REFERENCE SET TO SCAN CENTER');
-  }
-
-  function toggleLayer(layer: LayerKey) {
-    dispatch({ type: 'LAYER_TOGGLE', layer });
-    addLog('LAYER', `${layer.toUpperCase()} TOGGLED`);
+  async function shareLink() {
+    const url = window.location.href;
+    try {
+      if (navigator.share && !navigator.clipboard) await navigator.share({ title: 'Raven', url });
+      else await navigator.clipboard.writeText(url);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2000);
+    } catch {
+      setNotice('Copy the address bar to share this view');
+    }
   }
 
   function exportView() {
     const stamp = new Date().toISOString();
     downloadGeoJson(`raven-cameras-${stamp.slice(0, 10)}.geojson`, featuresToGeoJson(visible, stamp));
-    addLog('EXPORT', `${visible.length} VISIBLE CONTACTS EXPORTED AS GEOJSON`);
   }
 
-  async function clearCache() {
-    await clearProviderCache();
-    addLog('CACHE', 'BROWSER PROVIDER CACHE CLEARED');
-  }
-
-  const statusLabel = ACTIVITY_LABEL[activity] ?? SCAN_STATUS_LABEL[state.scan.status];
-  const statusTone = state.scan.status === 'error' ? 'bad'
-    : state.scan.status === 'dirty' || state.scan.status === 'partial' ? 'warn'
-    : activity !== 'READY' || state.scan.status === 'scanning' ? 'busy'
-    : 'ok';
-  const canScan = state.mode !== 'detecting' && mapReady && state.scan.status !== 'scanning';
+  const status = overallStatus(state);
+  const statusLabel = activity === 'SEARCHING' ? 'Searching…' : activity === 'LOCATING' ? 'Locating…' : STATUS_LABEL[status];
+  const statusTone = status === 'error' ? 'bad' : status === 'partial' ? 'warn' : activity !== 'READY' || status === 'loading' ? 'busy' : status === 'idle' ? 'warn' : 'ok';
+  const osmListHidden = state.osm.source === 'tiles' && state.viewport.zoom < OSM_LIST_ZOOM;
   const nearest = enriched[0];
   const selectedClass = selected ? MARKER_BY_KEY[markerKey(selected)] : null;
   const selectedEditUrl = selected ? osmEditUrl(selected) : undefined;
+  const dataDate = state.osm.generatedAt?.slice(0, 10) ?? state.live.generatedAt?.slice(0, 10);
 
   function openSide(tab: SideTab) {
     setSideTab(tab);
@@ -385,28 +350,24 @@ export default function App() {
   }
 
   return (
-    <div className={`raven-app scan-${state.scan.status}`}>
+    <div className={`raven-app data-${status}`}>
       <div className="map-layer">
         <RavenMap
           initialView={initialView}
-          features={visible}
+          features={visible.filter(feature => state.osm.source !== 'tiles' || feature.providerId !== 'osm-overpass')}
           selectedId={state.selectionId}
-          scanBounds={state.scan.bounds}
           origin={state.referenceOrigin}
-          heatEnabled={state.layers.heat}
-          outlineEnabled={state.layers.scanOutline}
-          fovEnabled={state.layers.fov}
-          ringsEnabled={state.layers.rings}
+          layers={state.layers}
+          osmTilesUrl={osmTilesUrl}
+          osmAttribution={osmAttribution}
           recentPoints={recentPoints}
-          recentEnabled={state.layers.recent}
           focus={focus}
           onViewportChange={handleViewport}
-          onSelect={id => dispatch({ type: 'SELECT', id })}
-          onBasemap={source => addLog('MAP', source === 'openfreemap' ? 'BASEMAP · OPENFREEMAP VECTOR' : 'BASEMAP UNAVAILABLE · OSM RASTER FALLBACK', source === 'openfreemap' ? 'info' : 'warn')}
+          onSelect={select}
+          onOsmView={handleOsmView}
         />
         <div className="map-vignette" aria-hidden="true" />
         <div className="origin-reticle" aria-hidden="true" />
-        {state.scan.status === 'scanning' && <div className="scan-sweep" aria-hidden="true" />}
       </div>
 
       <header className="topbar glass">
@@ -420,10 +381,9 @@ export default function App() {
           <button type="submit" className="icon-button" aria-label="Go"><ArrowRight size={16} /></button>
         </form>
         <div className="telemetry">
-          <Telemetry label="Origin" value={`${state.referenceOrigin.lat.toFixed(4)}, ${state.referenceOrigin.lon.toFixed(4)}`} sub={state.referenceOrigin.source} />
-          <Telemetry label="Zoom" value={`z${state.viewport.zoom.toFixed(1)}`} sub={state.scan.status === 'dirty' ? 'stale' : 'synced'} />
-          <Telemetry label="Visible" value={String(enriched.length)} sub={`${fetched.length} fetched`} />
-          <Telemetry label="UTC" value={clock.toISOString().slice(11, 19)} />
+          <Telemetry label="Origin" value={`${state.referenceOrigin.lat.toFixed(4)}, ${state.referenceOrigin.lon.toFixed(4)}`} sub={state.referenceOrigin.source === 'gps' ? 'my location' : 'map centre'} />
+          <Telemetry label="In view" value={osmListHidden && osmEstimate ? `≈${osmEstimate.toLocaleString()}` : String(enriched.length)} sub={osmListHidden ? 'zoom in to list' : 'cameras'} />
+          {dataDate && <Telemetry label="Data" value={dataDate} sub={state.osm.source === 'tiles' ? 'OSM extract' : 'published'} />}
         </div>
         <div className={`status-pill tone-${statusTone}`}>
           <i className="status-dot" aria-hidden="true" />
@@ -434,7 +394,7 @@ export default function App() {
 
       <aside className={`contacts panel glass ${mobilePanel === 'contacts' ? 'sheet-active' : ''}`} aria-label="Contacts">
         <div className="panel-head">
-          <h2><List size={15} aria-hidden="true" />Contacts</h2>
+          <h2><List size={15} aria-hidden="true" />Cameras in view</h2>
           <span className="count-chip contacts-count">{registerFilter.trim() ? `${registerFeatures.length} / ${enriched.length}` : enriched.length}</span>
           <button className="icon-button sheet-close" aria-label="Close contacts" onClick={() => setMobilePanel('none')}><X size={16} /></button>
         </div>
@@ -442,22 +402,20 @@ export default function App() {
           <Filter size={14} aria-hidden="true" />
           <input type="search" aria-label="Filter contact register" placeholder="Filter by name, route, operator…" value={registerFilter} onChange={event => setRegisterFilter(event.target.value)} />
         </label>
-        <VirtualContactList features={registerFeatures} selectedId={state.selectionId} onSelect={id => dispatch({ type: 'SELECT', id })} />
+        {osmListHidden && (
+          <p className="panel-note"><ZoomIn size={14} aria-hidden="true" />Zoom in to list OpenStreetMap cameras{osmEstimate ? ` · about ${osmEstimate.toLocaleString()} in view` : ''}</p>
+        )}
+        {state.osm.source === 'providers' && state.osm.warning && state.osm.status === 'idle' && (
+          <p className="panel-note"><ZoomIn size={14} aria-hidden="true" />{state.osm.warning}</p>
+        )}
+        <VirtualContactList features={registerFeatures} selectedId={state.selectionId} onSelect={id => select(id)} />
       </aside>
 
       <aside className={`side panel glass ${mobilePanel === 'side' ? 'sheet-active' : ''}`} aria-label="Analysis">
         <div className="panel-head">
           <div className="tabs" role="tablist" aria-label="Analysis panels">
             {SIDE_TABS.map(tab => (
-              <button
-                key={tab.key}
-                role="tab"
-                id={`tab-${tab.key}`}
-                aria-selected={sideTab === tab.key}
-                aria-controls="side-body"
-                className="tab"
-                onClick={() => setSideTab(tab.key)}
-              >
+              <button key={tab.key} role="tab" id={`tab-${tab.key}`} aria-selected={sideTab === tab.key} aria-controls="side-body" className="tab" onClick={() => setSideTab(tab.key)}>
                 <tab.icon size={14} aria-hidden="true" />{tab.label}
               </button>
             ))}
@@ -468,15 +426,15 @@ export default function App() {
           {sideTab === 'overview' && (
             <div className="stack">
               <div className="stat-grid">
-                <StatTile icon={Eye} label="Visible" value={String(enriched.length)} sub={`${fetched.length} fetched`} />
-                <StatTile icon={Target} label="Nearest" value={nearest ? formatRange(nearest.distance) : '—'} sub={nearest ? MARKER_BY_KEY[markerKey(nearest)].label : 'No camera in view'} />
+                <StatTile icon={Eye} label="In view" value={osmListHidden && osmEstimate ? `≈${osmEstimate.toLocaleString()}` : String(enriched.length)} sub={osmListHidden ? 'zoom in for the list' : `${loaded.length} loaded`} />
+                <StatTile icon={Target} label="Nearest" value={nearest ? formatRange(nearest.distance) : '—'} sub={nearest ? MARKER_BY_KEY[markerKey(nearest)].label : 'No camera listed'} />
               </div>
               {osmChanges && (
                 <section className="card stat-card newly-mapped">
                   <h3 className="eyebrow">Newly mapped · OSM</h3>
                   <strong>+{osmChanges.addedCount}</strong>
                   <small>{osmChanges.removedCount} removed · {osmChanges.since?.slice(0, 10) ?? '—'} → {osmChanges.until?.slice(0, 10) ?? '—'}</small>
-                  {osmChanges.feed && <a className="text-link" href={new URL(`osm/${osmChanges.feed}`, STATIC_API_BASE).href}><Rss size={13} aria-hidden="true" />Atom feed</a>}
+                  {osmChanges.feed && <a className="text-link" href={new URL(`osm/${osmChanges.feed}`, STATIC_API_BASE).href}><ExternalLink size={13} aria-hidden="true" />Atom feed</a>}
                 </section>
               )}
               <section className="card">
@@ -497,44 +455,51 @@ export default function App() {
               </section>
             </div>
           )}
-          {sideTab === 'layers' && (
-            <LayerPanel
-              layers={state.layers}
-              autoScan={state.autoScan}
-              onToggle={toggleLayer}
-              onAutoScan={value => { dispatch({ type: 'AUTO_SCAN_SET', value }); addLog('SCAN', `AUTO SCAN ${value ? 'ENABLED' : 'DISABLED'}`); }}
-            />
-          )}
+          {sideTab === 'layers' && <LayerPanel layers={state.layers} onToggle={layer => dispatch({ type: 'LAYER_TOGGLE', layer })} />}
           {sideTab === 'sources' && (
             <div className="stack">
               <section className="card">
-                <h3 className="eyebrow">Providers</h3>
-                {ravenProviders.map(provider => <SourceRow key={provider.id} name={provider.name} run={state.providers[provider.id]} />)}
+                <h3 className="eyebrow">Data sets</h3>
+                <SourceRow
+                  name="Live traffic cameras"
+                  data={state.live}
+                  detail={state.live.source === 'catalog'
+                    ? `Published catalog · ${catalogRef.current?.providers.map(id => providerById(id)?.name ?? id).join(', ') || 'no providers'}${state.live.generatedAt ? ` · ${state.live.generatedAt.slice(0, 10)}` : ''}`
+                    : 'Requested from FL511 and Caltrans for the area in view'}
+                />
+                <SourceRow
+                  name="OpenStreetMap cameras"
+                  data={state.osm}
+                  detail={state.osm.source === 'tiles' ? `Vector tiles from the ${osmIndex?.source ?? 'extract'}${state.osm.generatedAt ? ` · ${state.osm.generatedAt.slice(0, 10)}` : ''}` : 'Requested from Overpass for the area in view'}
+                />
               </section>
               <section className="card">
                 <h3 className="eyebrow">Data &amp; attribution</h3>
                 <p className="muted-note">Public and open data only. © OpenStreetMap contributors (ODbL) · OpenFreeMap · FL511 / Florida DOT · Caltrans.</p>
                 <a className="text-link" href={new URL('index.json', STATIC_API_BASE).href} target="_blank" rel="noreferrer"><ExternalLink size={13} aria-hidden="true" />Public camera API</a>
+                <a className="text-link" href="https://www.openstreetmap.org/fixthemap" target="_blank" rel="noreferrer"><PencilLine size={13} aria-hidden="true" />Fix the map</a>
               </section>
             </div>
           )}
-          {sideTab === 'log' && <LogView logs={state.logs} />}
         </div>
       </aside>
 
       <div className="legend glass" aria-label="Map legend">
         {MARKER_CLASSES.map(marker => (
-          <span key={marker.key} className={`legend-item ${state.layers[marker.layer] ? '' : 'is-off'}`}><MarkerSwatch marker={marker} />{marker.label}</span>
+          <button
+            key={marker.key}
+            type="button"
+            className={`legend-item ${state.layers[marker.layer] ? '' : 'is-off'}`}
+            aria-pressed={state.layers[marker.layer]}
+            title={`${state.layers[marker.layer] ? 'Hide' : 'Show'} ${marker.label.toLowerCase()}s`}
+            onClick={() => dispatch({ type: 'LAYER_TOGGLE', layer: marker.layer })}
+          >
+            <MarkerSwatch marker={marker} />{marker.label}
+          </button>
         ))}
       </div>
 
-      {state.scan.status === 'dirty' && (
-        <div className="toast glass">
-          <RefreshCw size={15} aria-hidden="true" />
-          <span>Map moved — results are from the previous scan</span>
-          <button onClick={() => void runScan('manual')}>Rescan</button>
-        </div>
-      )}
+      {notice && <div className="toast glass" role="status"><span>{notice}</span></div>}
 
       {selected && selectedClass && (
         <section className="detail-card glass" aria-label="Contact detail">
@@ -544,7 +509,7 @@ export default function App() {
               <small className="eyebrow">{selectedClass.label}</small>
               <strong className="detail-name">{selected.name || 'Camera'}</strong>
             </div>
-            <button className="icon-button" aria-label="Close contact detail" onClick={() => dispatch({ type: 'SELECT', id: null })}><X size={16} /></button>
+            <button className="icon-button" aria-label="Close contact detail" onClick={() => select(null)}><X size={16} /></button>
           </header>
           <div className="detail-scroll">
             <CameraViewer key={selected.id} feature={selected} />
@@ -563,26 +528,22 @@ export default function App() {
               {selected.sourceUrl && <a className="action-link" href={selected.sourceUrl} target="_blank" rel="noreferrer"><ExternalLink size={14} aria-hidden="true" />Open public source</a>}
               {selectedEditUrl && <a className="action-link" href={selectedEditUrl} target="_blank" rel="noreferrer"><PencilLine size={14} aria-hidden="true" />Edit on OpenStreetMap</a>}
             </div>
-            <details className="raw-details"><summary>Raw provider metadata</summary><pre>{JSON.stringify(selected.metadata, null, 2)}</pre></details>
+            {Object.keys(selected.metadata).length > 0 && <details className="raw-details"><summary>Raw provider metadata</summary><pre>{JSON.stringify(selected.metadata, null, 2)}</pre></details>}
             <div className="detail-source">{selected.attribution || selected.providerId}</div>
           </div>
         </section>
       )}
 
       <nav className="dock glass" aria-label="Actions">
-        <button className="dock-button primary" aria-label="Scan view" disabled={!canScan} onClick={() => void runScan('manual')}><Radar size={17} aria-hidden="true" /><span>Scan view</span></button>
+        <button className={`dock-button ${state.referenceOrigin.source === 'gps' ? 'is-on' : ''}`} aria-label="Measure from my location" aria-pressed={state.referenceOrigin.source === 'gps'} title="Measure ranges from your location instead of the map centre" onClick={toggleGpsOrigin}><LocateFixed size={17} aria-hidden="true" /><span>My location</span></button>
+        <button className="dock-button" aria-label="Share link" title="Copy a link to this view" onClick={() => void shareLink()}>{copied ? <Check size={17} aria-hidden="true" /> : <Link2 size={17} aria-hidden="true" />}<span>{copied ? 'Copied' : 'Share'}</span></button>
         <span className="dock-divider" aria-hidden="true" />
-        <button className="dock-button" aria-label="GPS origin" title="Measure ranges from your location" onClick={setGpsOrigin}><LocateFixed size={17} aria-hidden="true" /><span>GPS origin</span></button>
-        <button className="dock-button" aria-label="Scan origin" title="Measure ranges from the scan centre" onClick={setScanOrigin}><Crosshair size={17} aria-hidden="true" /><span>Scan origin</span></button>
-        <button className={`dock-button ${state.autoScan ? 'is-on' : ''}`} aria-label="Auto scan" aria-pressed={state.autoScan} title="Rescan shortly after the map stops moving" onClick={() => dispatch({ type: 'AUTO_SCAN_SET', value: !state.autoScan })}><RefreshCw size={17} aria-hidden="true" /><span>Auto scan</span></button>
-        <span className="dock-divider" aria-hidden="true" />
-        <button className="dock-button" aria-label="Export GeoJSON" title="Download the visible cameras as GeoJSON" disabled={visible.length === 0} onClick={exportView}><Download size={17} aria-hidden="true" /><span>Export</span></button>
+        <button className="dock-button" aria-label="Export GeoJSON" title="Download the listed cameras as GeoJSON" disabled={visible.length === 0} onClick={exportView}><Download size={17} aria-hidden="true" /><span>Export</span></button>
         <a className="dock-button" aria-label="Add camera to OSM" href={osmAddUrl(state.viewport.center)} target="_blank" rel="noreferrer" title="Map a missing camera in OpenStreetMap at the map centre"><MapPinPlus size={17} aria-hidden="true" /><span>Add camera</span></a>
-        <button className="dock-button" aria-label="Clear cache" title="Clear the browser provider cache" onClick={() => void clearCache()}><Trash2 size={17} aria-hidden="true" /><span>Clear cache</span></button>
       </nav>
 
       <nav className="mobile-tabs" aria-label="Raven panels">
-        <button className={mobilePanel === 'contacts' ? 'is-active' : ''} onClick={() => setMobilePanel(mobilePanel === 'contacts' ? 'none' : 'contacts')}><List size={18} aria-hidden="true" />Contacts</button>
+        <button className={mobilePanel === 'contacts' ? 'is-active' : ''} onClick={() => setMobilePanel(mobilePanel === 'contacts' ? 'none' : 'contacts')}><List size={18} aria-hidden="true" />Cameras</button>
         {SIDE_TABS.map(tab => (
           <button key={tab.key} className={mobilePanel === 'side' && sideTab === tab.key ? 'is-active' : ''} onClick={() => (mobilePanel === 'side' && sideTab === tab.key ? setMobilePanel('none') : openSide(tab.key))}>
             <tab.icon size={18} aria-hidden="true" />{tab.label}
@@ -593,24 +554,21 @@ export default function App() {
   );
 }
 
-type SideTab = 'overview' | 'layers' | 'sources' | 'log';
+type SideTab = 'overview' | 'layers' | 'sources';
 
 const SIDE_TABS: Array<{ key: SideTab; label: string; icon: ComponentType<{ size?: number; 'aria-hidden'?: boolean | 'true' }> }> = [
   { key: 'overview', label: 'Overview', icon: Activity },
   { key: 'layers', label: 'Layers', icon: Layers },
-  { key: 'sources', label: 'Sources', icon: Database },
-  { key: 'log', label: 'Log', icon: TerminalSquare }
+  { key: 'sources', label: 'Sources', icon: Database }
 ];
 
-const ACTIVITY_LABEL: Record<string, string> = { SCANNING: 'Scanning…', SEARCHING: 'Searching…', LOCATING: 'Locating…' };
-const SCAN_STATUS_LABEL = {
-  idle: 'Ready to scan',
-  dirty: 'Results stale',
-  scanning: 'Scanning…',
-  partial: 'Partial results',
-  ready: 'Ready',
-  error: 'Source error'
-} as const;
+const STATUS_LABEL: Record<DataStatus, string> = {
+  idle: 'Waiting for data',
+  loading: 'Loading cameras…',
+  ready: 'Up to date',
+  partial: 'Some data unavailable',
+  error: 'Data unavailable'
+};
 const MODE_LABEL: Record<RavenMode, string> = { detecting: 'Detecting', static: 'Web', local: 'Local' };
 
 function Telemetry({ label, value, sub }: { label: string; value: string; sub?: string }) {
@@ -631,35 +589,19 @@ function Fact({ label, value, wide, mono }: { label: string; value: string; wide
   return <div className={`fact ${wide ? 'is-wide' : ''}`}><dt>{label}</dt><dd className={mono ? 'mono' : ''}>{value}</dd></div>;
 }
 
-function SourceRow({ name, run }: { name: string; run?: ProviderRun }) {
-  const status = run?.status || 'idle';
-  const progress = run?.progress ? `${run.progress.completed}/${run.progress.total}` : '';
-  const detail = run?.error || run?.warning || run?.skipReason;
+function SourceRow({ name, data, detail }: { name: string; data: DataSet; detail: string }) {
+  const message = data.error || data.warning;
   return (
-    <div className={`source-row status-${status}`}>
+    <div className={`source-row status-${data.status}`}>
       <i className="status-dot" aria-hidden="true" />
       <div className="source-text">
         <strong>{name}</strong>
-        {detail && <small className={run?.error ? 'is-error' : run?.warning ? 'is-warning' : ''}>{detail}</small>}
+        <small>{detail}</small>
+        {message && <small className={data.error ? 'is-error' : 'is-warning'}>{message}</small>}
       </div>
-      <span className="chip">{status}{run?.features.length ? ` · ${run.features.length}` : ''}{progress ? ` · ${progress}` : ''}{run?.fromCache ? ' · cache' : ''}</span>
+      <span className="chip">{STATUS_CHIP[data.status]}{data.features.length ? ` · ${data.features.length}` : ''}</span>
     </div>
   );
 }
 
-function LogView({ logs }: { logs: RavenLogEntry[] }) {
-  return (
-    <div className="log-view">
-      <div className="log-meta">{logs.length} events</div>
-      <div className="log-lines">
-        {logs.map(entry => (
-          <div key={entry.id} className={`log-line log-${entry.level}`}>
-            <time>{new Date(entry.timestamp).toISOString().slice(11, 19)}</time>
-            <b>{entry.channel}</b>
-            <span>{entry.message}</span>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
+const STATUS_CHIP: Record<DataStatus, string> = { idle: 'waiting', loading: 'loading', ready: 'ready', partial: 'partial', error: 'error' };

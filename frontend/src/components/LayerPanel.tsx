@@ -14,9 +14,8 @@ const CAMERA_HINTS: Partial<Record<LayerKey, string>> = {
 const OVERLAYS: Array<{ key: LayerKey; label: string; hint: string }> = [
   { key: 'fov', label: 'Field of view', hint: 'Approx. facing where tagged · z15+' },
   { key: 'recent', label: 'Newly mapped', hint: 'Added to OSM since the last weekly extract' },
-  { key: 'heat', label: 'Heatmap', hint: 'Visible-contact density' },
-  { key: 'rings', label: 'Range rings', hint: 'Distance from reference origin' },
-  { key: 'scanOutline', label: 'Scan outline', hint: 'Last queried viewport' }
+  { key: 'heat', label: 'Heatmap', hint: 'Camera density' },
+  { key: 'rings', label: 'Range rings', hint: 'Distance from the reference point' }
 ];
 
 function Switch({ label, hint, checked, onChange, swatch }: { label: string; hint: string; checked: boolean; onChange: () => void; swatch?: ReactNode }) {
@@ -29,17 +28,7 @@ function Switch({ label, hint, checked, onChange, swatch }: { label: string; hin
   );
 }
 
-export function LayerPanel({
-  layers,
-  autoScan,
-  onToggle,
-  onAutoScan
-}: {
-  layers: Record<LayerKey, boolean>;
-  autoScan: boolean;
-  onToggle: (layer: LayerKey) => void;
-  onAutoScan: (value: boolean) => void;
-}) {
+export function LayerPanel({ layers, onToggle }: { layers: Record<LayerKey, boolean>; onToggle: (layer: LayerKey) => void }) {
   return (
     <div className="layer-panel">
       <section className="card">
@@ -60,10 +49,6 @@ export function LayerPanel({
         {OVERLAYS.map(layer => (
           <Switch key={layer.key} label={layer.label} hint={layer.hint} checked={layers[layer.key]} onChange={() => onToggle(layer.key)} />
         ))}
-      </section>
-      <section className="card">
-        <h3 className="eyebrow">Scanning</h3>
-        <Switch label="Auto scan" hint="Rescan shortly after the map stops moving" checked={autoScan} onChange={() => onAutoScan(!autoScan)} />
       </section>
     </div>
   );

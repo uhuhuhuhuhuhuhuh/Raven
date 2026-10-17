@@ -68,7 +68,8 @@ jobs:
         timeout-minutes: 45
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends osmium-tool
+          # tippecanoe turns the camera nodes into vector tiles (osm/cameras.pmtiles) the map renders directly.
+          sudo apt-get install -y -q --no-install-recommends osmium-tool tippecanoe
           python -m pip install -r scripts/requirements-osm.txt
           scripts/fetch-geofabrik-cameras.sh north-america/us "$RUNNER_TEMP/osm"
           # osm-tiles holds last week's build when the cache restored one, so changes.json diffs against it.

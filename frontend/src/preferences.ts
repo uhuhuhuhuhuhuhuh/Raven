@@ -4,7 +4,6 @@ const STORAGE_KEY = 'raven.preferences.v1';
 
 export type RavenPreferences = {
   layers?: Partial<Record<LayerKey, boolean>>;
-  autoScan?: boolean;
 };
 
 type KeyValueStore = Pick<Storage, 'getItem' | 'setItem'>;
@@ -18,7 +17,7 @@ function defaultStorage(): KeyValueStore | null {
 }
 
 /**
- * Reads saved layer/auto-scan choices. Storage can be missing, blocked or hold stale
+ * Reads saved layer choices. Storage can be missing, blocked or hold stale
  * shapes, so only known layer keys with boolean values survive.
  */
 export function loadPreferences(knownLayers: readonly LayerKey[], storage = defaultStorage()): RavenPreferences {
@@ -28,7 +27,7 @@ export function loadPreferences(knownLayers: readonly LayerKey[], storage = defa
     for (const key of knownLayers) {
       if (typeof parsed?.layers?.[key] === 'boolean') layers[key] = parsed.layers[key];
     }
-    return { layers, autoScan: typeof parsed?.autoScan === 'boolean' ? parsed.autoScan : undefined };
+    return { layers };
   } catch {
     return {};
   }

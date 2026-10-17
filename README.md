@@ -20,13 +20,12 @@ Raven does not probe private camera systems, bypass authentication, scan private
 Raven keeps these concepts separate so UI controls cannot corrupt data state:
 
 1. **Viewport**: what the map currently shows.
-2. **Last scan**: the exact bounds used by the most recent scan.
-3. **Reference origin**: the point used for range and azimuth calculations.
-4. **Provider results**: fetched camera records retained independently of layer visibility.
-5. **Layers**: derived visibility filters for mapped cameras, snapshots, streams, speed cameras, heat, and scan outline.
-6. **Selection**: the focused camera, independent of map/scan state.
+2. **Reference origin**: the point used for range and azimuth calculations (the map centre, or your location).
+3. **Data sets**: the live-camera catalog and the OpenStreetMap cameras, each with its own status, source and freshness, retained independently of layer visibility.
+4. **Layers**: derived visibility filters for mapped cameras, snapshots, streams, speed cameras, plate readers and overlays.
+5. **Selection**: the focused camera, independent of map and data state.
 
-Turning a layer off only hides matching records. Turning it back on restores them immediately without rescanning.
+Turning a layer off only hides matching records. Turning it back on restores them immediately without any request.
 
 ## Camera media semantics
 
@@ -52,11 +51,12 @@ Publicly mapped worldwide records for:
 - `man_made=surveillance`
 - `highway=speed_camera`
 
-OSM scanning uses the exact visible viewport. At broader views Raven progressively divides the viewport into bounded tiles and merges/deduplicates each tile as it arrives. OSM scanning is disabled below zoom 8 to avoid sending unreasonable continent/world-scale requests to the public Overpass service.
+On the published site these come from [vector tiles](#openstreetmap-extract-tiles-geofabrik) built weekly from the Geofabrik US extract: the map renders them directly at every zoom, and only the few-kilobyte tiles in view are ever downloaded. Clicking a camera fetches its full OSM record from the matching JSON tile.
 
-- When [extract tiles](#openstreetmap-extract-tiles-geofabrik) are published and the view lies entirely inside their boundary, Raven reads those static tiles instead of Overpass.
+Without published tiles (Raven Local without an extract, or a deploy where the extract build failed) the browser asks the public Overpass service for the area around the view, padded by a third so small pans need no new request, and never below zoom 8.
+
 - Overpass requests retry at most twice on 429/502/503/504, honouring `Retry-After`.
-- If some tiles fail, the tiles already loaded stay on the map and the scan is marked **PARTIAL**.
+- If some requests fail, what loaded stays on the map and the data set is marked **partial**.
 - Viewing directions come from `camera:direction` (falling back to `direction`), in degrees or compass points such as `SW`.
 
 ### FL511 / Florida DOT
@@ -88,52 +88,42 @@ Raven reads the provider's published:
 
 Caltrans publishes a direct HLS playlist (`wzmedia.dot.ca.gov/.../playlist.m3u8`) for roughly two thirds of its cameras, and Raven plays those live in-app. The stream host sends `Access-Control-Allow-Origin: *`, so playback works from GitHub Pages without a proxy. If a record instead publishes an official viewer page, Raven opens that viewer explicitly while retaining the public snapshot fallback in Raven.
 
-## Scan behavior
+## How data loads
 
-`SCAN VIEW` operates on the exact visible MapLibre bounds.
+Raven has no scan button. Data arrives in two ways, always for the area in view:
 
-- New scans abort the previous scan.
-- Every scan has a unique `scanId`; obsolete late responses are ignored.
-- Providers report progress as tiles/pages complete, so contacts appear incrementally.
-- Panning or zooming after a completed scan marks results **STALE**.
-- Optional **AUTO SCAN** performs a debounced scan after viewport movement.
-- Regional providers are automatically skipped outside their coverage.
-- Providers can define a safe minimum zoom. Skipped providers show the reason in Provider Health.
-- One provider failing while another succeeds produces **PARTIAL**, not a false READY state.
-- A provider that fails partway keeps the contacts it already delivered, and ArcGIS scans that hit their page cap say so, rather than silently truncating.
+**Published data (GitHub Pages, and Raven Local after a `build:api`).** The deploy writes
+`api/v1/cameras.json` (every live traffic camera, about 400 KB compressed) and
+`api/v1/osm/cameras.pmtiles` (every OpenStreetMap camera as vector tiles). The browser loads
+the catalog once and filters it by viewport locally; the map requests only the vector tiles
+it is drawing. Panning and zooming cost no agency or Overpass requests at all.
 
-## Browser provider cache
+**On-demand providers (fallback).** When a published file is missing, the relevant providers
+are asked for the view padded by a third, and asked again only once the view leaves that
+area. Regional providers are skipped outside their coverage or below their minimum zoom,
+and one provider failing while another succeeds marks the data set **partial**, not ready.
 
-GitHub Pages mode maintains recent provider scans in IndexedDB, with an in-memory fallback when browser storage is unavailable.
-
-Behavior:
-
-1. A recent exact-bounds cache entry is restored immediately.
-2. Raven still refreshes the source from the network.
-3. Progressive network results replace the cached result as they arrive.
-4. If the network refresh fails, Raven retains the cached data and marks the provider degraded/partial rather than clearing the map.
-5. **CLEAR CACHE** removes Raven's browser provider cache.
-6. Only complete results are cached. Entries expire after an hour, and the store keeps at most 200 entries (24 in the in-memory fallback), so long auto-scan sessions cannot grow it without bound.
-
-Provider caching is an availability/performance optimization; failures to read or write browser storage never fail a scan.
+The status pill shows the result: *Loading cameras…*, *Up to date*, *Some data unavailable*
+or *Data unavailable*. The **Sources** tab lists each data set with its source and the date
+of its data.
 
 ## Map and UI
 
 The interface is a full-bleed map with floating glass panels:
-- a top bar with search, telemetry and scan status;
-- a Contacts panel;
-- a tabbed side panel (Overview, Layers, Sources, Log);
-- an icon dock of actions;
-- a map legend.
+- a top bar with search, telemetry (origin, cameras in view, data date) and data status;
+- a Cameras-in-view panel;
+- a tabbed side panel (Overview, Layers, Sources);
+- an icon dock of actions (my location, share link, export, add camera);
+- a map legend whose items toggle their layer.
 
 Text uses self-hosted Inter and JetBrains Mono, so there are no third-party font requests. On phones and tablets (1100 px and below), panels become bottom sheets behind a tab bar.
 
 Camera markers encode their class twice, by hue and by shape: blue dot/ringed dot for snapshot/live stream, an orange diamond for plate readers, aqua circle/square for mapped/speed cameras. A map can put any two markers side by side, and only three hues pass colour-vision checks across every pair (validated with the dataviz palette validator), so shape carries the rest.
 
-- MapLibre map with native marker clustering on an [OpenFreeMap](https://openfreemap.org/) dark vector basemap, tinted to Raven's palette. OpenFreeMap is free, keyless and cookie-free, and built for app traffic, unlike the volunteer-run `tile.openstreetmap.org`. If it cannot be reached, the map falls back to OSM raster tiles; the system log records which basemap is in use.
-- separate unclustered heatmap source
-- exact last-scan outline
-- virtualized Contact Register
+- MapLibre map on an [OpenFreeMap](https://openfreemap.org/) dark vector basemap, tinted to Raven's palette. OpenFreeMap is free, keyless and cookie-free, and built for app traffic, unlike the volunteer-run `tile.openstreetmap.org`. If it cannot be reached, the map falls back to OSM raster tiles.
+- OpenStreetMap cameras from pre-clustered vector tiles (one cluster colour per class), live cameras clustered by MapLibre
+- heatmap overlay over both data sets
+- virtualized camera list; zoomed out over the tiles it shows an estimated count and asks you to zoom in
 - mapped/snapshot/stream/speed-camera layer controls, with a colour key
 - **Plate readers (ALPR)**: OSM `surveillance:type=ALPR` cameras get their own violet layer and counts, with the `manufacturer` shown when mapped
 - **Newly mapped**: rings around cameras added to OSM since the previous weekly extract, plus added/removed counts and an Atom feed link in the analytics rail. These show mapping activity, not installation dates.
@@ -141,20 +131,19 @@ Camera markers encode their class twice, by hue and by shape: blue dot/ringed do
 - **Range rings** (250 m – 5 km) around the reference origin
 - shareable view links: the address bar tracks `#map=zoom/lat/lon`, and opening one restores that view
 - Contact Register filter by name, route, operator, zone or class
-- **EXPORT GEOJSON** downloads the visible cameras, with every source's attribution
-- **EDIT ON OPENSTREETMAP** on OSM records, and **ADD CAMERA TO OSM**, which opens the OSM editor at the map centre
-- layer and auto-scan choices remembered in `localStorage`
-- provider health, progress, coverage and cache state
-- real timestamped system log
+- **Export** downloads the listed cameras as GeoJSON, with every source's attribution
+- **Share** copies a link to the current view
+- **Edit on OpenStreetMap** on OSM records, and **Add camera**, which opens the OSM editor at the map centre
+- layer choices remembered in `localStorage`
+- data-set status, source and freshness in the Sources tab
 - camera/provider metadata inspector
 - refreshed snapshot viewer with ACTIVE/STALE/OFFLINE state
 - direct-video and official-viewer live-stream paths
 - desktop tactical layout
-- mobile Contacts, Layers/Analytics and Log drawers
-- stale-results banner
+- mobile Cameras, Overview, Layers and Sources drawers
 - React error boundary
 - visible OpenStreetMap attribution
-- accessibility: labelled controls, a polite live region for scan status, Escape to close the detail card or drawer, visible focus rings, and `prefers-reduced-motion` support
+- accessibility: labelled controls, a polite live region for data status, Escape to close the detail card or drawer, visible focus rings, and `prefers-reduced-motion` support
 
 ## Snapshot viewer
 
@@ -345,13 +334,13 @@ A `streams.json` record:
 [Geofabrik](https://download.geofabrik.de/north-america/us.html) publishes daily OpenStreetMap extracts with `.poly` boundaries. The Pages workflow turns the US extract into static camera tiles, at most once a week:
 
 1. `scripts/fetch-geofabrik-cameras.sh north-america/us <dir>` streams the ~11 GB extract through `osmium tags-filter`, so only surveillance and speed-camera nodes reach the disk. A truncated download fails the step.
-2. `scripts/build_osm_tiles.py` writes 0.5° JSON tiles plus `osm/index.json`, which records the coverage boundary, the extract's data date and the ODbL notice.
+2. `scripts/build_osm_tiles.py` writes 0.5° JSON tiles plus `osm/index.json`, which records the coverage boundary, the extract's data date and the ODbL notice. With [tippecanoe](https://github.com/felt/tippecanoe) installed it also writes `osm/cameras.pmtiles`: one [PMTiles](https://docs.protomaps.com/pmtiles/) archive (about 24 MB for the US) with a vector-tile layer per marker class, points clustered below zoom 14. GitHub Pages serves it with HTTP range requests, so the map reads a few kilobytes per tile.
 3. With `--previous` pointing at last week's tiles (restored from the Actions cache), it also writes `osm/changes.json` with the cameras added and removed since then. With `--site-url` it writes `osm/changes.atom`, one entry per newly mapped camera, linking to its spot on the map.
 4. If Geofabrik is unavailable, the deploy ships last week's tiles, or none, and the map uses Overpass.
 
 The first production build, on 2026-09-24, published 184,587 US camera nodes in 2,301 tiles.
 
-The browser uses the tiles only when the entire scan box lies inside the boundary. That means every corner is inside and no boundary edge crosses the box, so holes and coastline notches send the scan to Overpass instead. Records carry attribution such as `© OpenStreetMap contributors · Geofabrik north-america/us, data as of 2026-09-22`.
+The map draws the vector tiles directly. When a camera is selected, its full record is read from the JSON tile for that spot. Records carry attribution such as `© OpenStreetMap contributors · Geofabrik north-america/us, data as of 2026-10-14`.
 
 For Raven Local, build tiles for any extract (a state is far smaller than the whole US) into `frontend/public`, which each launch copies into the site:
 
