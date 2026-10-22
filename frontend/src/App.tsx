@@ -370,7 +370,7 @@ export default function App() {
         <div className="origin-reticle" aria-hidden="true" />
       </div>
 
-      <header className="topbar glass">
+      <header className="topbar">
         <div className="brand">
           <span className="brand-mark"><Radar size={18} strokeWidth={2.2} /></span>
           <span className="brand-text"><strong>Raven</strong><small>Open-data camera awareness</small></span>
@@ -392,7 +392,7 @@ export default function App() {
         </div>
       </header>
 
-      <aside className={`contacts panel glass ${mobilePanel === 'contacts' ? 'sheet-active' : ''}`} aria-label="Contacts">
+      <aside className={`contacts panel ${mobilePanel === 'contacts' ? 'sheet-active' : ''}`} aria-label="Contacts">
         <div className="panel-head">
           <h2><List size={15} aria-hidden="true" />Cameras in view</h2>
           <span className="count-chip contacts-count">{registerFilter.trim() ? `${registerFeatures.length} / ${enriched.length}` : enriched.length}</span>
@@ -411,7 +411,7 @@ export default function App() {
         <VirtualContactList features={registerFeatures} selectedId={state.selectionId} onSelect={id => select(id)} />
       </aside>
 
-      <aside className={`side panel glass ${mobilePanel === 'side' ? 'sheet-active' : ''}`} aria-label="Analysis">
+      <aside className={`side panel ${mobilePanel === 'side' ? 'sheet-active' : ''}`} aria-label="Analysis">
         <div className="panel-head">
           <div className="tabs" role="tablist" aria-label="Analysis panels">
             {SIDE_TABS.map(tab => (
@@ -484,7 +484,7 @@ export default function App() {
         </div>
       </aside>
 
-      <div className="legend glass" aria-label="Map legend">
+      <div className="legend" aria-label="Map legend">
         {MARKER_CLASSES.map(marker => (
           <button
             key={marker.key}
@@ -499,10 +499,10 @@ export default function App() {
         ))}
       </div>
 
-      {notice && <div className="toast glass" role="status"><span>{notice}</span></div>}
+      {notice && <div className="toast" role="status"><span>{notice}</span></div>}
 
       {selected && selectedClass && (
-        <section className="detail-card glass" aria-label="Contact detail">
+        <section className="detail-card" aria-label="Contact detail">
           <header className="detail-head">
             <MarkerSwatch marker={selectedClass} size={18} />
             <div className="detail-title">
@@ -534,7 +534,7 @@ export default function App() {
         </section>
       )}
 
-      <nav className="dock glass" aria-label="Actions">
+      <nav className="dock" aria-label="Actions">
         <button className={`dock-button ${state.referenceOrigin.source === 'gps' ? 'is-on' : ''}`} aria-label="Measure from my location" aria-pressed={state.referenceOrigin.source === 'gps'} title="Measure ranges from your location instead of the map centre" onClick={toggleGpsOrigin}><LocateFixed size={17} aria-hidden="true" /><span>My location</span></button>
         <button className="dock-button" aria-label="Share link" title="Copy a link to this view" onClick={() => void shareLink()}>{copied ? <Check size={17} aria-hidden="true" /> : <Link2 size={17} aria-hidden="true" />}<span>{copied ? 'Copied' : 'Share'}</span></button>
         <span className="dock-divider" aria-hidden="true" />

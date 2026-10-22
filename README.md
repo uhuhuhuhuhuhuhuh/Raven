@@ -116,7 +116,7 @@ The interface is a full-bleed map with floating glass panels:
 - an icon dock of actions (my location, share link, export, add camera);
 - a map legend whose items toggle their layer.
 
-Text uses self-hosted Inter and JetBrains Mono, so there are no third-party font requests. On phones and tablets (1100 px and below), panels become bottom sheets behind a tab bar.
+Text uses self-hosted Archivo (condensed, tracked capitals for labels) and JetBrains Mono for every number, so there are no third-party font requests. Panels are opaque and flush with the screen edge; one amber "signal" colour marks the origin crosshair, the active control and focus, and never a camera class. On phones and tablets (1100 px and below), panels become bottom sheets behind a tab bar.
 
 Camera markers encode their class twice, by hue and by shape: blue dot/ringed dot for snapshot/live stream, an orange diamond for plate readers, aqua circle/square for mapped/speed cameras. A map can put any two markers side by side, and only three hues pass colour-vision checks across every pair (validated with the dataviz palette validator), so shape carries the rest.
 
